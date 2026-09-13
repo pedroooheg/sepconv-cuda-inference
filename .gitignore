@@ -1,0 +1,19 @@
+# Ambientes virtuais e Python
+venv/
+__pycache__/
+*.pyc
+
+# Pesos de modelos e binários grandes
+*.pytorch
+*.onnx
+*.bin
+
+# Arquivos de vídeo e saídas temporárias
+*.mp4
+*.avi
+
+# Arquivos temporários do LaTeX / IDEs
+.vscode/
+.idea/
+*.aux
+*.log
