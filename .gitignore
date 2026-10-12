@@ -3,17 +3,28 @@ venv/
 __pycache__/
 *.pyc
 
+# Builds do C++/CMake
+implementacao/motor_cpp/build/
+build/
+
 # Pesos de modelos e binários grandes
+modelos/
 *.pytorch
 *.onnx
+*.onnx.data
 *.bin
 
-# Arquivos de vídeo e saídas temporárias
+# Vídeos (entradas e saídas)
 *.mp4
 *.avi
+*.mkv
+desktop.ini
 
 # Arquivos temporários do LaTeX / IDEs
 .vscode/
 .idea/
 *.aux
 *.log
+*.out
+*.toc
+*.synctex.gz

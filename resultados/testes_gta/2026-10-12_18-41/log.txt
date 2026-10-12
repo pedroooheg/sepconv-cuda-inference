@@ -1,0 +1,46 @@
+**********************
+PowerShell transcript start
+Start time: 20261012184141
+Username: DESKTOP-JD623SS\Pedro
+RunAs User: DESKTOP-JD623SS\Pedro
+Configuration Name: 
+Machine: DESKTOP-JD623SS (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $__claudeCodeScript = $env:CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT; $env:CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT = $null; Invoke-Expression -Command $__claudeCodeScript
+Process ID: 22704
+PSVersion: 7.6.6
+PSEdition: Core
+GitCommitId: 7.6.6
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.4
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+
+========== cpp | 720p ==========
+
+========== python | 720p ==========
+
+========== cpp | 1080p ==========
+
+========== python | 1080p ==========
+
+========== cpp | 1440p ==========
+
+========== python | 1440p ==========
+
+========== cpp | 2160p ==========
+2026-10-12 18:51:12.9847003 [E:onnxruntime:, sequential_executor.cc:572 onnxruntime::ExecuteKernel] Non-zero status code returned while running Conv node. Name:'node_conv2d_30' Status Message: E:\_work\1\s\onnxruntime\core\framework\bfc_arena.cc:359 onnxruntime::BFCArena::AllocateRawInternal Failed to allocate memory for requested buffer of size 2123366400
+
+
+ERRO DO ONNX RUNTIME:
+Non-zero status code returned while running Conv node. Name:'node_conv2d_30' Status Message: E:\_work\1\s\onnxruntime\core\framework\bfc_arena.cc:359 onnxruntime::BFCArena::AllocateRawInternal Failed to allocate memory for requested buffer of size 2123366400
+
+FALHOU: cpp 2160p
+
+========== python | 2160p ==========
+**********************
+PowerShell transcript end
+End time: 20261012185518
+**********************

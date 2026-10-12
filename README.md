@@ -180,7 +180,9 @@ O modelo original disponibiliza, entre outros arquivos, os pesos utilizados na r
 network-paper.pytorch
 ```
 
-O arquivo ONNX utilizado pela implementação deve estar disponível no diretório definido pela configuração do projeto.
+A exportação é feita por `implementacao/exportacao_onnx/export_onnx.py`, que gera `modelos/sepconv_paper.onnx` (+ `.onnx.data`). O script `validar_onnx.py`, na mesma pasta, compara as saídas do ONNX com as do PyTorch em várias resoluções.
+
+> O `Decode` original recorta tensores com um `if` em Python dependente do tamanho da imagem. No export esse recorte ficava fixo, e o ONNX só funcionava em 1080×1920. O `export_onnx.py` substitui o recorte por um *slice* equivalente, válido para qualquer resolução. A versão antiga está em `modelos/onnx_antigo_so_1080p/`.
 
 > Os arquivos de pesos e modelos originais devem ser utilizados de acordo com as condições de licença e distribuição estabelecidas pelos respectivos autores.
 
@@ -206,59 +208,55 @@ As versões específicas utilizadas nos experimentos devem ser consultadas na co
 
 ## 🚀 Compilação
 
-Clone o repositório e entre no diretório do projeto:
+O motor fica em `implementacao/motor_cpp/`. O `CMakePresets.json` já define o gerador (Visual Studio 2022) e o toolset CUDA 13.3:
 
 ```bash
-git clone <URL_DO_REPOSITORIO>
-cd <DIRETORIO_DO_REPOSITORIO>
+cd implementacao/motor_cpp
+cmake --preset release
+cmake --build --preset release
 ```
 
-Crie o diretório de compilação:
+Os executáveis são gerados em `implementacao/motor_cpp/build/Release/`.
 
-```bash
-mkdir build
-cd build
-```
-
-Configure o projeto com o CMake:
-
-```bash
-cmake ..
-```
-
-Compile em modo Release:
-
-```bash
-cmake --build . --config Release
-```
-
-> Os comandos podem variar de acordo com o sistema operacional, compilador e gerador utilizado pelo CMake.
+> O ONNX Runtime 1.23 (GPU) depende das DLLs do CUDA 12 e do cuDNN 9. Por padrão o motor usa as que acompanham o PyTorch em `venv/Lib/site-packages/torch/lib`; outro diretório pode ser indicado pela variável de ambiente `SEPCONV_CUDA_DLL_DIR`.
 
 ---
 
 ## ▶️ Execução
 
-Após a compilação, a aplicação pode ser executada informando o vídeo de entrada, o modelo ONNX e o caminho do vídeo de saída.
-
-Exemplo:
-
-```bash
-./sepconv_cuda \
-    --video input.mp4 \
-    --model sepconv_paper.onnx \
-    --output output.mp4
-```
-
-No Windows, utilizando um executável gerado pelo Visual Studio:
+A partir da raiz do projeto:
 
 ```powershell
-.\Release\sepconv_cuda.exe `
-    --video input.mp4 `
-    --model sepconv_paper.onnx `
-    --output output.mp4
+.\implementacao\motor_cpp\build\Release\sepconv_engine.exe `
+    --model modelos\sepconv_paper.onnx `
+    --one original\images\one.png `
+    --two original\images\two.png `
+    --out resultados\validacao_cpp\cpp_one_two.png `
+    --runs 20 --warmup 5
 ```
 
-Os parâmetros apresentados dependem da interface de linha de comando implementada no projeto.
+Opções do CUDA Execution Provider podem ser repassadas com `--ort-option chave=valor`.
+
+Baseline em Python e comparação de qualidade:
+
+```powershell
+venv\Scripts\python.exe implementacao\avaliacao\benchmark_python.py --one original\images\one.png --two original\images\two.png
+venv\Scripts\python.exe implementacao\avaliacao\comparar_imagens.py resultados\validacao_cpp\python_one_two.png resultados\validacao_cpp\cpp_one_two.png
+```
+
+---
+
+## 🎮 Testes com os vídeos do GTA VI
+
+1. Gerar os vídeos de teste (trecho de 8 s a 10 s, sem cortes de cena, em 720p/1080p/1440p/2160p, sem perdas):
+   `venv/Scripts/python.exe implementacao/utilitarios_video/preparar_testes.py`
+2. Executar a bateria C++ × Python (desempenho, VRAM, PSNR/SSIM):
+   `./implementacao/avaliacao/executar_testes_gta.ps1` (adicione `-Incluir4K` para o 2160p)
+3. Os resultados ficam em `resultados/testes_gta/<data_hora>/`: `desempenho.csv`, `qualidade.csv` (PSNR, SSIM e VMAF apenas dos quadros sintetizados), `quadros/` (métricas por quadro), `resumo.md`, `log.txt` e os vídeos em `saidas/`.
+4. Os gráficos (PDF + PNG) e a tabela LaTeX são gerados automaticamente em `graficos/`. Para refazê-los:
+   `venv/Scripts/python.exe implementacao/avaliacao/gerar_graficos.py resultados/testes_gta/<data_hora>`
+
+> O VMAF exige o FFmpeg com `libvmaf` no PATH.
 
 ---
 
@@ -337,21 +335,32 @@ Os resultados quantitativos serão apresentados após a realização dos experim
 
 ## 📁 Estrutura do Repositório
 
-A organização final do repositório pode seguir a estrutura:
-
 ```text
 .
-├── CMakeLists.txt
 ├── README.md
-├── include/
-├── src/
-├── kernels/
-├── models/
-├── videos/
-└── build/
+├── original/                  Trabalho original (Niklaus) — código de referência
+│   ├── run.py, sepconv.py     Rede e camada sepconv em PyTorch (baseline)
+│   ├── benchmark.py, LICENSE, requirements.txt
+│   ├── images/                Par de quadros de exemplo (one.png / two.png)
+│   └── middlebury/            Benchmark Middlebury (com ground truth)
+├── implementacao/             Implementação deste TCC
+│   ├── motor_cpp/             Motor C++/CUDA (CMake, src/, include/)
+│   ├── exportacao_onnx/       Exportação PyTorch → ONNX e validação
+│   ├── avaliacao/             Baseline Python e métricas (PSNR/SSIM)
+│   └── utilitarios_video/     Scripts de preparo e montagem de vídeos
+├── modelos/                   Pesos .pytorch e modelos .onnx
+├── dados/
+│   └── videos/                Vídeos de entrada (GTA VI, Lucia, car-turn)
+├── resultados/                Saídas geradas
+│   ├── videos/                Vídeos interpolados e comparações
+│   ├── quadros_gta_838_957/   Quadros extraídos para análise
+│   ├── figuras_tcc/           Imagens usadas no texto do TCC
+│   └── validacao_cpp/         Saídas C++ × Python usadas na validação
+├── tcc/                       Texto do TCC (main.tex)
+└── venv/                      Ambiente Python (não versionado)
 ```
 
-A estrutura pode ser modificada durante o desenvolvimento conforme a organização definitiva dos componentes da implementação.
+> Em `original/run.py`, a única alteração em relação ao repositório de Niklaus é a desativação das asserções que limitavam a resolução de entrada a 1280×720.
 
 ---
 

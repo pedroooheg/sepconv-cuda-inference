@@ -1,0 +1,25 @@
+% Gerado por implementacao/avaliacao/gerar_graficos.py
+\begin{table}[htb]
+\centering
+\caption{Desempenho e fidelidade visual por resolução (interpolação 2$\times$)}
+\label{tab:resultados_gta}
+\small
+\begin{tabular}{llrrrrr}
+\toprule
+\textbf{Resolução} & \textbf{Implementação} & \textbf{ms/quadro} & \textbf{VRAM (MiB)} & \textbf{PSNR (dB)} & \textbf{SSIM} & \textbf{VMAF} \\
+\midrule
+720p & C++/CUDA & 133,9 & 3.138 & 34,48 & 0,9622 & 85,16 \\
+720p & Python/PyTorch & 176,8 & 2.149 & 34,48 & 0,9622 & 85,16 \\
+\midrule
+1080p & C++/CUDA & 305,5 & 6.648 & 34,10 & 0,9538 & 77,42 \\
+1080p & Python/PyTorch & 404,9 & 4.585 & 34,10 & 0,9538 & 77,42 \\
+\midrule
+1440p & C++/CUDA & 7.745,1$^{*}$ & 7.264 & 34,04 & 0,9532 & 71,91 \\
+1440p & Python/PyTorch & 1.344,5$^{*}$ & 7.324 & 34,04 & 0,9532 & 71,91 \\
+\midrule
+2160p & C++/CUDA & \multicolumn{5}{c}{falhou por falta de memória} \\
+2160p & Python/PyTorch & 64.900,5$^{*}$ & 7.133 & 31,44 & 0,9323 & 50,33 \\
+\bottomrule
+\end{tabular}
+\legend{$^{*}$ VRAM saturada durante a execução. Fonte: Elaborado pelo autor (2026)}
+\end{table}

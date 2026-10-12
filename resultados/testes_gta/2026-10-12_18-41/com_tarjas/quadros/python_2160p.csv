@@ -1,0 +1,5 @@
+implementacao,referencia,quadro,psnr,ssim,vmaf
+python,gta_2160p_30fps.mkv,1,34.0435,0.961232,59.9554
+python,gta_2160p_30fps.mkv,3,30.6131,0.928894,51.5274
+python,gta_2160p_30fps.mkv,5,32.1068,0.943370,60.4486
+python,gta_2160p_30fps.mkv,7,32.8604,0.949441,63.2080
