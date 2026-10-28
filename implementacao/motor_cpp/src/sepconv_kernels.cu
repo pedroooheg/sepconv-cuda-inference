@@ -27,6 +27,49 @@ __global__ void bgr8_to_planar_float_kernel(
     }
 }
 
+__global__ void frame_sums_kernel(
+    const float* __restrict__ data,
+    std::size_t count,
+    double* __restrict__ partials
+)
+{
+    __shared__ double shared_sum[256];
+    __shared__ double shared_squares[256];
+
+    double sum = 0.0;
+    double squares = 0.0;
+
+    for (std::size_t i = blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+         i < count;
+         i += static_cast<std::size_t>(blockDim.x) * gridDim.x)
+    {
+        const double value = data[i];
+        sum += value;
+        squares += value * value;
+    }
+
+    shared_sum[threadIdx.x] = sum;
+    shared_squares[threadIdx.x] = squares;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2)
+    {
+        if (threadIdx.x < stride)
+        {
+            shared_sum[threadIdx.x] += shared_sum[threadIdx.x + stride];
+            shared_squares[threadIdx.x] += shared_squares[threadIdx.x + stride];
+        }
+
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0)
+    {
+        partials[2 * blockIdx.x] = shared_sum[0];
+        partials[2 * blockIdx.x + 1] = shared_squares[0];
+    }
+}
+
 // Acumula a contribuicao de um quadro para o pixel (x, y).
 //
 // Como cada pixel possui o seu proprio par de filtros (v, h), a soma e feita
@@ -41,6 +84,8 @@ __device__ float accumulate_frame(
     const float* __restrict__ frame,
     const float* __restrict__ ver,
     const float* __restrict__ hor,
+    std::size_t filter_plane,
+    std::size_t filter_pixel,
     int x,
     int y,
     int width,
@@ -51,7 +96,6 @@ __device__ float accumulate_frame(
     constexpr int R = K / 2;
 
     const std::size_t plane = static_cast<std::size_t>(width) * height;
-    const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
 
     float h[K];
     int sx[K];
@@ -60,7 +104,7 @@ __device__ float accumulate_frame(
     #pragma unroll
     for (int fx = 0; fx < K; ++fx)
     {
-        h[fx] = hor[fx * plane + pixel];
+        h[fx] = hor[fx * filter_plane + filter_pixel];
         sx[fx] = min(max(x + fx - R, 0), width - 1);
         hor_sum += h[fx];
     }
@@ -69,7 +113,7 @@ __device__ float accumulate_frame(
 
     for (int fy = 0; fy < K; ++fy)
     {
-        const float v = ver[fy * plane + pixel];
+        const float v = ver[fy * filter_plane + filter_pixel];
         ver_sum += v;
 
         const int sy = min(max(y + fy - R, 0), height - 1);
@@ -99,30 +143,39 @@ template <int K>
 __global__ void __launch_bounds__(256) sepconv_kernel(
     const float* __restrict__ frame1,
     const float* __restrict__ frame2,
+    int width,
+    int height,
     const float* __restrict__ ver1,
     const float* __restrict__ hor1,
     const float* __restrict__ ver2,
     const float* __restrict__ hor2,
+    SepconvRegion region,
     std::uint8_t* __restrict__ out,
     int out_width,
-    int out_height,
-    int width,
-    int height
+    int out_height
 )
 {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int tx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ty = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x >= out_width || y >= out_height)
+    const int x = region.x0 + tx;
+    const int y = region.y0 + ty;
+
+    if (tx >= region.width || ty >= region.height || x >= out_width || y >= out_height)
     {
         return;
     }
 
+    const std::size_t filter_plane =
+        static_cast<std::size_t>(region.filter_width) * region.filter_height;
+    const std::size_t filter_pixel =
+        static_cast<std::size_t>(region.filter_y0 + ty) * region.filter_width + region.filter_x0 + tx;
+
     float acc[3] = { 0.0f, 0.0f, 0.0f };
 
     float norm =
-        accumulate_frame<K>(frame1, ver1, hor1, x, y, width, height, acc) +
-        accumulate_frame<K>(frame2, ver2, hor2, x, y, width, height, acc);
+        accumulate_frame<K>(frame1, ver1, hor1, filter_plane, filter_pixel, x, y, width, height, acc) +
+        accumulate_frame<K>(frame2, ver2, hor2, filter_plane, filter_pixel, x, y, width, height, acc);
 
     // Mesmo criterio do run.py: evita divisao por valores proximos de zero.
     if (fabsf(norm) < 0.01f)
@@ -167,25 +220,51 @@ void launch_bgr8_to_planar_float(
     );
 }
 
+void frame_sums(
+    const float* data,
+    std::size_t count,
+    double* partials,
+    double& sum,
+    double& sum_of_squares,
+    cudaStream_t stream
+)
+{
+    frame_sums_kernel<<<SEPCONV_REDUCTION_BLOCKS, 256, 0, stream>>>(data, count, partials);
+
+    double host[2 * SEPCONV_REDUCTION_BLOCKS];
+    cudaMemcpyAsync(host, partials, sizeof(host), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    sum = 0.0;
+    sum_of_squares = 0.0;
+
+    for (int i = 0; i < SEPCONV_REDUCTION_BLOCKS; ++i)
+    {
+        sum += host[2 * i];
+        sum_of_squares += host[2 * i + 1];
+    }
+}
+
 void launch_sepconv(
     const float* frame1,
     const float* frame2,
+    int width,
+    int height,
     const float* ver1,
     const float* hor1,
     const float* ver2,
     const float* hor2,
+    const SepconvRegion& region,
     std::uint8_t* out,
     int out_width,
     int out_height,
-    int width,
-    int height,
     cudaStream_t stream
 )
 {
     const dim3 block(32, 8);
 
-    sepconv_kernel<SEPCONV_KERNEL_SIZE><<<grid_for(out_width, out_height, block), block, 0, stream>>>(
-        frame1, frame2, ver1, hor1, ver2, hor2,
-        out, out_width, out_height, width, height
+    sepconv_kernel<SEPCONV_KERNEL_SIZE><<<grid_for(region.width, region.height, block), block, 0, stream>>>(
+        frame1, frame2, width, height, ver1, hor1, ver2, hor2,
+        region, out, out_width, out_height
     );
 }

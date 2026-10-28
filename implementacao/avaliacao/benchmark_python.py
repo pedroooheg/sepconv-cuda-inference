@@ -233,7 +233,7 @@ def main():
                     "implementacao", "modo", "entrada", "largura", "altura", "fator", "medicoes",
                     "upload_ms", "pre_ms", "inferencia_ms", "sepconv_ms", "download_ms", "total_ms", "total_desvio_ms",
                     "quadros_saida", "tempo_video_s", "vram_total_mib", "vram_base_mib", "vram_pico_mib",
-                    "vram_consumo_mib", "vram_saturada",
+                    "vram_consumo_mib", "vram_saturada", "bloco", "margem",
                 ])
 
             # O run.estimate nao separa os estagios: apenas o total e medido.
@@ -241,7 +241,7 @@ def main():
                 "python", modo, os.path.basename(entrada), largura, altura, fator, len(medidas),
                 "", "", "", "", "", f"{medidas.mean():.3f}", f"{medidas.std():.3f}",
                 gravados, f"{tempo_video:.3f}", f"{vram_total:.3f}", f"{vram_base:.3f}", f"{vram_pico:.3f}",
-                f"{vram_pico - vram_base:.3f}", int(saturada),
+                f"{vram_pico - vram_base:.3f}", int(saturada), 0, 0,
             ])
 
         print(f"Resumo acrescentado em: {args.csv}")

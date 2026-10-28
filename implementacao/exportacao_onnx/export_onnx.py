@@ -4,6 +4,9 @@ import sys
 # Raiz do projeto (dois niveis acima de implementacao/exportacao_onnx/)
 RAIZ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# --blocos exporta a variante para processamento em blocos (ver SepConvTileExtractor)
+EXPORTAR_BLOCOS = "--blocos" in sys.argv
+
 sys.argv = sys.argv[:1]  # run.py faz getopt no import
 sys.path.insert(0, os.path.join(RAIZ, "original"))
 
@@ -71,6 +74,57 @@ class SepConvFeatureExtractor(nn.Module):
         return tenVerone, tenVertwo, tenHorone, tenHortwo
 
 
+# Variante para processamento em blocos: a media e o desvio padrao sao
+# calculados pelo motor sobre o quadro inteiro e recebidos como entrada, para
+# que todos os blocos sejam normalizados da mesma forma que o quadro completo.
+class SepConvTileExtractor(SepConvFeatureExtractor):
+    def forward(self, tenOne, tenTwo, tenMean, tenStd):
+        tenOneNorm = (tenOne - tenMean) / (tenStd + 0.0000001)
+        tenTwoNorm = (tenTwo - tenMean) / (tenStd + 0.0000001)
+
+        tenOut = self.netDecode(self.netEncode([torch.cat([self.netInput(tenOneNorm), self.netInput(tenTwoNorm)], 1)] + ([0.0] * (len(self.intChannels) - 1))))[1]
+
+        return self.netVerone(tenOut), self.netVertwo(tenOut), self.netHorone(tenOut), self.netHortwo(tenOut)
+
+
+def export_sepconv_tiles_to_onnx():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    model = SepConvTileExtractor(Network().to(device)).to(device)
+    model.eval()
+
+    # Bloco de 512 com margem de 96 px de cada lado
+    height, width = 704, 704
+    dummy_frame1 = torch.rand(1, 3, height, width, device=device)
+    dummy_frame2 = torch.rand(1, 3, height, width, device=device)
+    dummy_mean = torch.full((1, 1, 1, 1), 0.5, device=device)
+    dummy_std = torch.full((1, 1, 1, 1), 0.25, device=device)
+
+    output_onnx_path = os.path.join(RAIZ, "modelos", "sepconv_blocos.onnx")
+
+    print("Exportando a variante para blocos...")
+    torch.onnx.export(
+        model,
+        (dummy_frame1, dummy_frame2, dummy_mean, dummy_std),
+        output_onnx_path,
+        export_params=True,
+        opset_version=16,
+        do_constant_folding=True,
+        input_names=['input_frame1', 'input_frame2', 'mean', 'std'],
+        output_names=['kernel_v1', 'kernel_v2', 'kernel_h1', 'kernel_h2'],
+        dynamic_axes={
+            'input_frame1': {2: 'height', 3: 'width'},
+            'input_frame2': {2: 'height', 3: 'width'},
+            'kernel_v1': {2: 'height', 3: 'width'},
+            'kernel_v2': {2: 'height', 3: 'width'},
+            'kernel_h1': {2: 'height', 3: 'width'},
+            'kernel_h2': {2: 'height', 3: 'width'}
+        }
+    )
+
+    print(f"\nSucesso! Modelo ONNX salvo em: {os.path.abspath(output_onnx_path)}")
+
+
 def export_sepconv_to_onnx():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Utilizando dispositivo: {device}")
@@ -117,4 +171,7 @@ def export_sepconv_to_onnx():
     print(f"\nSucesso! Modelo ONNX salvo em: {os.path.abspath(output_onnx_path)}")
 
 if __name__ == '__main__':
-    export_sepconv_to_onnx()
+    if EXPORTAR_BLOCOS:
+        export_sepconv_tiles_to_onnx()
+    else:
+        export_sepconv_to_onnx()

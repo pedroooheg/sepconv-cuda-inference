@@ -17,6 +17,9 @@
 //                      [--factor 2|4] [--max-frames N] [--warmup 3]
 //
 // Opcoes comuns:
+//   --bloco T --margem M       processamento em blocos T x T com M pixels de
+//                              margem (exige o modelo sepconv_blocos.onnx);
+//                              --bloco 0 (padrao) processa o quadro inteiro
 //   --csv arquivo.csv          acrescenta uma linha de resumo ao CSV
 //   --ort-option chave=valor   repassa opcoes ao CUDA Execution Provider,
 //                              ex.: cudnn_conv_algo_search=HEURISTIC
@@ -77,6 +80,8 @@ struct Arguments
     int warmup = 3;
     int factor = 2;
     int max_frames = 0;
+    int tile = 0;
+    int margin = 96;
     std::vector<std::pair<std::string, std::string>> ort_options;
 };
 
@@ -99,6 +104,8 @@ Arguments parse_arguments(int argc, char* argv[])
         else if (key == "--warmup") args.warmup = std::stoi(value);
         else if (key == "--factor") args.factor = std::stoi(value);
         else if (key == "--max-frames") args.max_frames = std::stoi(value);
+        else if (key == "--bloco") args.tile = std::stoi(value);
+        else if (key == "--margem") args.margin = std::stoi(value);
         else if (key == "--ort-option")
         {
             const std::size_t separator = value.find('=');
@@ -122,13 +129,20 @@ Arguments parse_arguments(int argc, char* argv[])
             "uso:\n"
             "  sepconv_engine.exe --model m.onnx --one a.png --two b.png --out out.png [--runs N] [--warmup N]\n"
             "  sepconv_engine.exe --model m.onnx --video in.mkv --out out.mkv [--factor 2|4] [--max-frames N] [--warmup N]\n"
-            "  opcoes comuns: [--csv resumo.csv] [--ort-option chave=valor]"
+            "  opcoes comuns: [--bloco T --margem M] [--csv resumo.csv] [--ort-option chave=valor]"
         );
     }
 
     if (args.factor != 2 && args.factor != 4)
     {
         throw std::runtime_error("--factor deve ser 2 ou 4");
+    }
+
+    // Blocos e margens multiplos de 16 (fator de reducao da rede) mantem a
+    // grade interna da rede alinhada com a do quadro inteiro.
+    if (args.tile < 0 || args.tile % 16 != 0 || args.margin < 0 || args.margin % 16 != 0)
+    {
+        throw std::runtime_error("--bloco e --margem devem ser multiplos de 16");
     }
 
     return args;
@@ -260,6 +274,11 @@ void print_stage(const char* name, const std::vector<double>& values)
 // =============================================================
 // Motor: aloca todos os buffers uma unica vez para a resolucao do
 // video e reutiliza-os em todas as interpolacoes.
+//
+// Com --bloco 0 a rede roda sobre o quadro inteiro (v1). Com --bloco T o
+// quadro e dividido em blocos T x T; cada bloco e processado com M pixels
+// de margem (--margem) e apenas o seu miolo e aproveitado, de modo que os
+// filtros e as ativacoes da rede passam a ter o tamanho de um bloco.
 // =============================================================
 
 class SepConvEngine
@@ -276,13 +295,21 @@ public:
           // A rede exige dimensoes pares (mesmo padding replicate do run.py).
           width_(out_width + (out_width % 2)),
           height_(out_height + (out_height % 2)),
+          tile_(args.tile),
+          margin_(args.margin),
+          filter_width_(tile_ > 0 ? std::min(width_, tile_ + 2 * margin_) : width_),
+          filter_height_(tile_ > 0 ? std::min(height_, tile_ + 2 * margin_) : height_),
           vram_(vram),
           env_(ORT_LOGGING_LEVEL_ERROR, "SepConvEngine"),
           cuda_memory_("Cuda", OrtDeviceAllocator, 0, OrtMemTypeDefault)
     {
         allocate_buffers();
         create_session(args);
-        bind_tensors();
+
+        if (tile_ == 0)
+        {
+            bind_full_frame();
+        }
 
         for (cudaEvent_t& event : events_)
         {
@@ -301,6 +328,10 @@ public:
         cudaFree(d_bgr_two_);
         cudaFree(d_frame_one_);
         cudaFree(d_frame_two_);
+        cudaFree(d_tile_one_);
+        cudaFree(d_tile_two_);
+        cudaFree(d_stats_);
+        cudaFree(d_partials_);
 
         for (float* filter : d_filters_)
         {
@@ -319,11 +350,14 @@ public:
     double buffers_mib() const
     {
         const double pixels = static_cast<double>(width_) * height_;
+        const double filter_pixels = static_cast<double>(filter_width_) * filter_height_;
+        const double tile_frames = tile_ > 0 ? 2.0 * filter_pixels * 3 * sizeof(float) : 0.0;
 
-        return (2.0 * pixels * 3 +                                   // quadros uint8
-                2.0 * pixels * 3 * sizeof(float) +                   // quadros float
-                4.0 * pixels * SEPCONV_KERNEL_SIZE * sizeof(float) + // filtros 1D
-                static_cast<double>(out_width_) * out_height_ * 3)   // saida uint8
+        return (2.0 * pixels * 3 +                                          // quadros uint8
+                2.0 * pixels * 3 * sizeof(float) +                          // quadros float
+                tile_frames +                                               // recortes dos blocos
+                4.0 * filter_pixels * SEPCONV_KERNEL_SIZE * sizeof(float) + // filtros 1D
+                static_cast<double>(out_width_) * out_height_ * 3)          // saida uint8
                / (1024.0 * 1024.0);
     }
 
@@ -353,22 +387,22 @@ public:
         cudaEventRecord(events_[2]);
         check_cuda(cudaDeviceSynchronize(), "pre-processamento");
 
-        // 4. Inferencia (o ONNX Runtime usa o proprio stream e so retorna
-        //    depois que a GPU termina, por isso o tempo e medido no Host)
-        const auto inference_start = Clock::now();
-        session_.Run(run_options_, binding_);
-        const auto inference_end = Clock::now();
+        float upload_ms = 0.0f;
+        float convert_ms = 0.0f;
+        cudaEventElapsedTime(&upload_ms, events_[0], events_[1]);
+        cudaEventElapsedTime(&convert_ms, events_[1], events_[2]);
 
-        vram_.sample();
+        // 4 e 5. Inferencia e convolucao separavel
+        StageSplit split;
 
-        // 5. Convolucao separavel
-        // Ordem de saida do ONNX: kernel_v1, kernel_v2, kernel_h1, kernel_h2.
-        cudaEventRecord(events_[3]);
-        launch_sepconv(d_frame_one_, d_frame_two_,
-                       d_filters_[0], d_filters_[2], d_filters_[1], d_filters_[3],
-                       d_out_, out_width_, out_height_, width_, height_, nullptr);
-        check_cuda(cudaGetLastError(), "launch sepconv");
-        cudaEventRecord(events_[4]);
+        if (tile_ == 0)
+        {
+            run_full_frame(split);
+        }
+        else
+        {
+            run_tiles(split);
+        }
 
         // 6. Device -> Host
         check_cuda(cudaMemcpy(result.data, d_out_, out_bytes, cudaMemcpyDeviceToHost), "download");
@@ -380,28 +414,153 @@ public:
             return;
         }
 
-        float upload_ms = 0.0f;
-        float preprocess_ms = 0.0f;
-        float sepconv_ms = 0.0f;
-
-        cudaEventElapsedTime(&upload_ms, events_[0], events_[1]);
-        cudaEventElapsedTime(&preprocess_ms, events_[1], events_[2]);
-        cudaEventElapsedTime(&sepconv_ms, events_[3], events_[4]);
-
-        const double inference_ms = elapsed_ms(inference_start, inference_end);
+        const double preprocess_ms = convert_ms + split.preparation_ms;
         const double total_ms = elapsed_ms(start, end);
 
         times->upload.push_back(upload_ms);
         times->preprocess.push_back(preprocess_ms);
-        times->inference.push_back(inference_ms);
-        times->sepconv.push_back(sepconv_ms);
+        times->inference.push_back(split.inference_ms);
+        times->sepconv.push_back(split.sepconv_ms);
         times->total.push_back(total_ms);
         times->download.push_back(
-            total_ms - upload_ms - preprocess_ms - inference_ms - sepconv_ms
+            total_ms - upload_ms - preprocess_ms - split.inference_ms - split.sepconv_ms
         );
     }
 
 private:
+    struct StageSplit
+    {
+        double preparation_ms = 0.0;  // estatisticas e recortes (apenas em blocos)
+        double inference_ms = 0.0;
+        double sepconv_ms = 0.0;
+    };
+
+    // O ONNX Runtime usa o proprio stream e so retorna depois que a GPU
+    // termina, por isso o tempo de inferencia e medido no Host.
+    double run_inference()
+    {
+        const auto start = Clock::now();
+        session_.Run(run_options_, binding_);
+        const double duration = elapsed_ms(start, Clock::now());
+
+        vram_.sample();
+        return duration;
+    }
+
+    // Convolucao da regiao; sincroniza antes de retornar para que os
+    // filtros possam ser sobrescritos pela inferencia do proximo bloco.
+    double run_sepconv(const float* frame_one, const float* frame_two, const SepconvRegion& region)
+    {
+        // Ordem de saida do ONNX: kernel_v1, kernel_v2, kernel_h1, kernel_h2.
+        cudaEventRecord(events_[3]);
+        launch_sepconv(frame_one, frame_two, width_, height_,
+                       d_filters_[0], d_filters_[2], d_filters_[1], d_filters_[3],
+                       region, d_out_, out_width_, out_height_, nullptr);
+        check_cuda(cudaGetLastError(), "launch sepconv");
+        cudaEventRecord(events_[4]);
+        check_cuda(cudaEventSynchronize(events_[4]), "sepconv");
+
+        float duration = 0.0f;
+        cudaEventElapsedTime(&duration, events_[3], events_[4]);
+        return duration;
+    }
+
+    void run_full_frame(StageSplit& split)
+    {
+        split.inference_ms = run_inference();
+
+        const SepconvRegion region{ 0, 0, out_width_, out_height_, 0, 0, width_, height_ };
+        split.sepconv_ms = run_sepconv(d_frame_one_, d_frame_two_, region);
+    }
+
+    void run_tiles(StageSplit& split)
+    {
+        const auto statistics_start = Clock::now();
+        upload_statistics();
+        split.preparation_ms += elapsed_ms(statistics_start, Clock::now());
+
+        for (int y0 = 0; y0 < out_height_; y0 += tile_)
+        {
+            for (int x0 = 0; x0 < out_width_; x0 += tile_)
+            {
+                const int y1 = std::min(y0 + tile_, out_height_);
+                const int x1 = std::min(x0 + tile_, out_width_);
+
+                // Recorte com margem, limitado ao quadro da rede (dimensoes
+                // pares); como bloco e margem sao multiplos de 16, o recorte
+                // comeca em multiplo de 16 e a grade interna da rede coincide
+                // com a do quadro inteiro.
+                const int cy0 = std::max(0, y0 - margin_);
+                const int cx0 = std::max(0, x0 - margin_);
+                const int cy1 = std::min(height_, y1 + margin_ + (y1 % 2));
+                const int cx1 = std::min(width_, x1 + margin_ + (x1 % 2));
+
+                const auto copy_start = Clock::now();
+                copy_tile(cx0, cy0, cx1 - cx0, cy1 - cy0);
+                split.preparation_ms += elapsed_ms(copy_start, Clock::now());
+
+                split.inference_ms += run_inference();
+
+                const SepconvRegion region{
+                    x0, y0, x1 - x0, y1 - y0,
+                    x0 - cx0, y0 - cy0, cx1 - cx0, cy1 - cy0
+                };
+                split.sepconv_ms += run_sepconv(d_frame_one_, d_frame_two_, region);
+            }
+        }
+    }
+
+    // Media e desvio padrao dos dois quadros inteiros, combinados como em
+    // run.Network.forward (desvio populacional de cada quadro).
+    void upload_statistics()
+    {
+        const std::size_t count = static_cast<std::size_t>(width_) * height_ * 3;
+
+        double sum_one = 0.0, squares_one = 0.0, sum_two = 0.0, squares_two = 0.0;
+        frame_sums(d_frame_one_, count, d_partials_, sum_one, squares_one, nullptr);
+        frame_sums(d_frame_two_, count, d_partials_, sum_two, squares_two, nullptr);
+
+        const double mean_one = sum_one / count;
+        const double mean_two = sum_two / count;
+        const double var_one = std::max(0.0, squares_one / count - mean_one * mean_one);
+        const double var_two = std::max(0.0, squares_two / count - mean_two * mean_two);
+
+        const double mean = (mean_one + mean_two) / 2.0;
+        const double variance = (var_one + (mean - mean_one) * (mean - mean_one) +
+                                 var_two + (mean - mean_two) * (mean - mean_two)) / 2.0;
+
+        const float stats[2] = { static_cast<float>(mean), static_cast<float>(std::sqrt(variance)) };
+        check_cuda(cudaMemcpy(d_stats_, stats, sizeof(stats), cudaMemcpyHostToDevice), "upload estatisticas");
+    }
+
+    // Copia o recorte [cy0, cy0 + h) x [cx0, cx0 + w) dos dois quadros para
+    // os buffers do bloco e associa as entradas e saidas do ONNX ao formato
+    // desse recorte.
+    void copy_tile(int cx0, int cy0, int w, int h)
+    {
+        const std::size_t plane = static_cast<std::size_t>(width_) * height_;
+        const std::size_t tile_plane = static_cast<std::size_t>(w) * h;
+
+        for (int c = 0; c < 3; ++c)
+        {
+            const std::size_t offset = c * plane + static_cast<std::size_t>(cy0) * width_ + cx0;
+
+            check_cuda(cudaMemcpy2D(d_tile_one_ + c * tile_plane, w * sizeof(float),
+                                    d_frame_one_ + offset, width_ * sizeof(float),
+                                    w * sizeof(float), h, cudaMemcpyDeviceToDevice), "recorte one");
+            check_cuda(cudaMemcpy2D(d_tile_two_ + c * tile_plane, w * sizeof(float),
+                                    d_frame_two_ + offset, width_ * sizeof(float),
+                                    w * sizeof(float), h, cudaMemcpyDeviceToDevice), "recorte two");
+        }
+
+        check_cuda(cudaDeviceSynchronize(), "recorte");
+
+        if (w != bound_width_ || h != bound_height_)
+        {
+            bind_tile(w, h);
+        }
+    }
+
     const cv::Mat& pad_to_network(const cv::Mat& frame, cv::Mat& buffer) const
     {
         if (frame.cols != out_width_ || frame.rows != out_height_ || frame.type() != CV_8UC3)
@@ -421,15 +580,24 @@ private:
     void allocate_buffers()
     {
         const std::size_t pixels = static_cast<std::size_t>(width_) * height_;
+        const std::size_t filter_pixels = static_cast<std::size_t>(filter_width_) * filter_height_;
 
         check_cuda(cudaMalloc(&d_bgr_one_, pixels * 3), "cudaMalloc bgr_one");
         check_cuda(cudaMalloc(&d_bgr_two_, pixels * 3), "cudaMalloc bgr_two");
         check_cuda(cudaMalloc(&d_frame_one_, pixels * 3 * sizeof(float)), "cudaMalloc frame_one");
         check_cuda(cudaMalloc(&d_frame_two_, pixels * 3 * sizeof(float)), "cudaMalloc frame_two");
 
+        if (tile_ > 0)
+        {
+            check_cuda(cudaMalloc(&d_tile_one_, filter_pixels * 3 * sizeof(float)), "cudaMalloc tile_one");
+            check_cuda(cudaMalloc(&d_tile_two_, filter_pixels * 3 * sizeof(float)), "cudaMalloc tile_two");
+            check_cuda(cudaMalloc(&d_stats_, 2 * sizeof(float)), "cudaMalloc stats");
+            check_cuda(cudaMalloc(&d_partials_, 2 * SEPCONV_REDUCTION_BLOCKS * sizeof(double)), "cudaMalloc partials");
+        }
+
         for (float*& filter : d_filters_)
         {
-            check_cuda(cudaMalloc(&filter, pixels * SEPCONV_KERNEL_SIZE * sizeof(float)), "cudaMalloc filtro");
+            check_cuda(cudaMalloc(&filter, filter_pixels * SEPCONV_KERNEL_SIZE * sizeof(float)), "cudaMalloc filtro");
         }
 
         check_cuda(cudaMalloc(&d_out_, static_cast<std::size_t>(out_width_) * out_height_ * 3), "cudaMalloc out");
@@ -462,22 +630,37 @@ private:
 
         const std::wstring model_path = std::filesystem::path(args.model).wstring();
         session_ = Ort::Session(env_, model_path.c_str(), session_options);
+
+        const std::size_t expected_inputs = tile_ > 0 ? 4 : 2;
+
+        if (session_.GetInputCount() != expected_inputs)
+        {
+            throw std::runtime_error(
+                tile_ > 0
+                    ? "o processamento em blocos exige o modelo sepconv_blocos.onnx (entradas mean e std)"
+                    : "o quadro inteiro exige o modelo sepconv_paper.onnx (2 entradas)"
+            );
+        }
+
+        binding_ = Ort::IoBinding(session_);
     }
 
     // I/O binding: entradas e saidas do ONNX apontam diretamente para os
     // buffers alocados pelo motor, sem copias intermediarias pela CPU.
-    void bind_tensors()
+    void bind_frames_and_filters(float* frame_one, float* frame_two, int w, int h)
     {
-        const std::size_t pixels = static_cast<std::size_t>(width_) * height_;
-        const std::int64_t frame_shape[] = { 1, 3, height_, width_ };
-        const std::int64_t filter_shape[] = { 1, SEPCONV_KERNEL_SIZE, height_, width_ };
+        const std::size_t pixels = static_cast<std::size_t>(w) * h;
+        const std::int64_t frame_shape[] = { 1, 3, h, w };
+        const std::int64_t filter_shape[] = { 1, SEPCONV_KERNEL_SIZE, h, w };
 
-        binding_ = Ort::IoBinding(session_);
+        tensors_.clear();
+        binding_.ClearBoundInputs();
+        binding_.ClearBoundOutputs();
 
-        tensors_.push_back(Ort::Value::CreateTensor<float>(cuda_memory_, d_frame_one_, pixels * 3, frame_shape, 4));
+        tensors_.push_back(Ort::Value::CreateTensor<float>(cuda_memory_, frame_one, pixels * 3, frame_shape, 4));
         binding_.BindInput("input_frame1", tensors_.back());
 
-        tensors_.push_back(Ort::Value::CreateTensor<float>(cuda_memory_, d_frame_two_, pixels * 3, frame_shape, 4));
+        tensors_.push_back(Ort::Value::CreateTensor<float>(cuda_memory_, frame_two, pixels * 3, frame_shape, 4));
         binding_.BindInput("input_frame2", tensors_.back());
 
         const char* output_names[4] = { "kernel_v1", "kernel_v2", "kernel_h1", "kernel_h2" };
@@ -491,10 +674,35 @@ private:
         }
     }
 
+    void bind_full_frame()
+    {
+        bind_frames_and_filters(d_frame_one_, d_frame_two_, width_, height_);
+    }
+
+    void bind_tile(int w, int h)
+    {
+        bind_frames_and_filters(d_tile_one_, d_tile_two_, w, h);
+
+        const std::int64_t scalar_shape[] = { 1, 1, 1, 1 };
+
+        tensors_.push_back(Ort::Value::CreateTensor<float>(cuda_memory_, d_stats_, 1, scalar_shape, 4));
+        binding_.BindInput("mean", tensors_.back());
+
+        tensors_.push_back(Ort::Value::CreateTensor<float>(cuda_memory_, d_stats_ + 1, 1, scalar_shape, 4));
+        binding_.BindInput("std", tensors_.back());
+
+        bound_width_ = w;
+        bound_height_ = h;
+    }
+
     const int out_width_;
     const int out_height_;
     const int width_;
     const int height_;
+    const int tile_;
+    const int margin_;
+    const int filter_width_;
+    const int filter_height_;
 
     VramMonitor& vram_;
 
@@ -502,8 +710,15 @@ private:
     std::uint8_t* d_bgr_two_ = nullptr;
     float* d_frame_one_ = nullptr;
     float* d_frame_two_ = nullptr;
+    float* d_tile_one_ = nullptr;
+    float* d_tile_two_ = nullptr;
+    float* d_stats_ = nullptr;
+    double* d_partials_ = nullptr;
     float* d_filters_[4] = {};
     std::uint8_t* d_out_ = nullptr;
+
+    int bound_width_ = 0;
+    int bound_height_ = 0;
 
     cv::Mat padded_one_;
     cv::Mat padded_two_;
@@ -524,6 +739,8 @@ private:
 
 struct Summary
 {
+    int tile = 0;
+    int margin = 0;
     std::string mode;
     std::string input;
     int width = 0;
@@ -586,17 +803,20 @@ void append_csv(const std::string& path, const StageTimes& times, const VramMoni
     {
         csv << "implementacao,modo,entrada,largura,altura,fator,medicoes,"
                "upload_ms,pre_ms,inferencia_ms,sepconv_ms,download_ms,total_ms,total_desvio_ms,"
-               "quadros_saida,tempo_video_s,vram_total_mib,vram_base_mib,vram_pico_mib,vram_consumo_mib,vram_saturada\n";
+               "quadros_saida,tempo_video_s,vram_total_mib,vram_base_mib,vram_pico_mib,vram_consumo_mib,vram_saturada,"
+               "bloco,margem\n";
     }
 
     csv << std::fixed << std::setprecision(3)
-        << "cpp," << summary.mode << ',' << std::filesystem::path(summary.input).filename().string() << ','
+        << (summary.tile > 0 ? "cpp_b" + std::to_string(summary.tile) : std::string("cpp")) << ','
+        << summary.mode << ',' << std::filesystem::path(summary.input).filename().string() << ','
         << summary.width << ',' << summary.height << ',' << summary.factor << ',' << times.total.size() << ','
         << mean(times.upload) << ',' << mean(times.preprocess) << ',' << mean(times.inference) << ','
         << mean(times.sepconv) << ',' << mean(times.download) << ',' << mean(times.total) << ','
         << stddev(times.total) << ',' << summary.written_frames << ',' << summary.wall_seconds << ','
         << vram.total_mib << ',' << vram.baseline_mib << ',' << vram.peak_mib << ','
-        << vram.peak_mib - vram.baseline_mib << ',' << (vram.saturated() ? 1 : 0) << '\n';
+        << vram.peak_mib - vram.baseline_mib << ',' << (vram.saturated() ? 1 : 0) << ','
+        << summary.tile << ',' << (summary.tile > 0 ? summary.margin : 0) << '\n';
 
     std::cout << "Resumo acrescentado em: " << path << "\n";
 }
@@ -604,6 +824,19 @@ void append_csv(const std::string& path, const StageTimes& times, const VramMoni
 // =============================================================
 // Modos de execucao
 // =============================================================
+
+void print_mode(const Arguments& args)
+{
+    if (args.tile > 0)
+    {
+        std::cout << "Processamento em blocos de " << args.tile << "x" << args.tile
+                  << " com margem de " << args.margin << " px\n";
+    }
+    else
+    {
+        std::cout << "Processamento do quadro inteiro\n";
+    }
+}
 
 int run_image_mode(const Arguments& args, VramMonitor& vram)
 {
@@ -621,6 +854,7 @@ int run_image_mode(const Arguments& args, VramMonitor& vram)
     }
 
     SepConvEngine engine(args, one.cols, one.rows, vram);
+    print_mode(args);
 
     std::cout << "Resolucao: " << one.cols << "x" << one.rows
               << " (rede: " << engine.width() << "x" << engine.height() << ")\n";
@@ -638,7 +872,7 @@ int run_image_mode(const Arguments& args, VramMonitor& vram)
         throw std::runtime_error("nao foi possivel gravar " + args.out);
     }
 
-    Summary summary{ "imagem", args.one, one.cols, one.rows, 2, 1, 0.0 };
+    Summary summary{ args.tile, args.margin, "imagem", args.one, one.cols, one.rows, 2, 1, 0.0 };
     print_report(times, vram, engine, summary);
 
     if (!args.csv.empty())
@@ -687,6 +921,7 @@ int run_video_mode(const Arguments& args, VramMonitor& vram)
               << total_frames << " quadros de entrada, fator " << args.factor << "x\n";
 
     SepConvEngine engine(args, width, height, vram);
+    print_mode(args);
 
     const auto start = Clock::now();
 
@@ -759,7 +994,7 @@ int run_video_mode(const Arguments& args, VramMonitor& vram)
 
     std::cout << "\n";
 
-    Summary summary{ "video", args.video, width, height, args.factor, written, wall_seconds };
+    Summary summary{ args.tile, args.margin, "video", args.video, width, height, args.factor, written, wall_seconds };
     print_report(times, vram, engine, summary);
 
     if (!args.csv.empty())

@@ -237,6 +237,8 @@ A partir da raiz do projeto:
 
 Opções do CUDA Execution Provider podem ser repassadas com `--ort-option chave=valor`.
 
+Processamento em blocos (v2): `--bloco 512 --margem 96`, com o modelo `modelos\sepconv_blocos.onnx` (gerado por `export_onnx.py --blocos`). A margem de 96 px foi definida pelo estudo em `implementacao\tiling\estudo_margem.py`. Com `--bloco 0` (padrão), o motor processa o quadro inteiro, como na v1.
+
 Baseline em Python e comparação de qualidade:
 
 ```powershell
@@ -356,7 +358,7 @@ Os resultados quantitativos serão apresentados após a realização dos experim
 │   ├── quadros_gta_838_957/   Quadros extraídos para análise
 │   ├── figuras_tcc/           Imagens usadas no texto do TCC
 │   └── validacao_cpp/         Saídas C++ × Python usadas na validação
-├── tcc/                       Texto do TCC (main.tex)
+├── tcc/                       Aviso: o texto fica em github.com/pedroooheg/video-frame-interpolation
 └── venv/                      Ambiente Python (não versionado)
 ```
 
