@@ -18,6 +18,7 @@ import argparse
 import csv
 import os
 import sys
+import threading
 import time
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,6 +57,26 @@ def vram_usada_mib():
 vram_total = pynvml.nvmlDeviceGetMemoryInfo(dispositivo).total / (1024 * 1024)
 vram_base = vram_usada_mib()
 vram_pico = vram_base
+
+
+# Como no motor C++, uma thread le a NVML a cada ~1 ms durante toda a
+# execucao, para que o pico nao dependa de a memoria continuar reservada
+# depois de cada interpolacao.
+def amostrar_vram():
+    global vram_pico
+
+    while not parar_amostragem.is_set():
+        vram_pico = max(vram_pico, vram_usada_mib())
+        time.sleep(0.001)
+
+
+if os.name == "nt":
+    import ctypes
+    ctypes.windll.winmm.timeBeginPeriod(1)  # resolucao de 1 ms para o sleep
+
+parar_amostragem = threading.Event()
+amostragem = threading.Thread(target=amostrar_vram, daemon=True)
+amostragem.start()
 
 import run  # noqa: E402  (importado depois da linha de base de VRAM)
 
@@ -191,6 +212,9 @@ def main():
     modo, entrada, largura, altura, fator, gravados, tempo_video = (
         modo_video() if args.video else modo_imagem()
     )
+
+    parar_amostragem.set()
+    amostragem.join()
 
     medidas = numpy.array(tempos)
     # A NVML so enxerga a memoria fisica da GPU. Quando o PyTorch reserva mais

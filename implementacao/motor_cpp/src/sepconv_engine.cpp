@@ -23,6 +23,13 @@
 //   --csv arquivo.csv          acrescenta uma linha de resumo ao CSV
 //   --ort-option chave=valor   repassa opcoes ao CUDA Execution Provider,
 //                              ex.: cudnn_conv_algo_search=HEURISTIC
+//   --ort-config chave=valor   configuracao da sessao do ONNX Runtime, ex.:
+//                              session.use_device_allocator_for_initializers=1
+//   --ort-run-config chave=valor
+//                              configuracao de cada execucao (Run), ex.:
+//                              memory.enable_memory_arena_shrinkage=gpu:0
+//   --padrao-memoria 0|1       planejamento de memoria do ONNX Runtime
+//                              (memory pattern); padrao 1
 
 #include "sepconv_kernels.cuh"
 
@@ -35,6 +42,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -46,7 +54,10 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+
+#pragma comment(lib, "winmm.lib")  // timeBeginPeriod
 
 namespace
 {
@@ -82,8 +93,23 @@ struct Arguments
     int max_frames = 0;
     int tile = 0;
     int margin = 96;
+    bool memory_pattern = true;
     std::vector<std::pair<std::string, std::string>> ort_options;
+    std::vector<std::pair<std::string, std::string>> session_configs;
+    std::vector<std::pair<std::string, std::string>> run_configs;
 };
+
+std::pair<std::string, std::string> key_value(const std::string& option, const std::string& value)
+{
+    const std::size_t separator = value.find('=');
+
+    if (separator == std::string::npos)
+    {
+        throw std::runtime_error(option + " espera chave=valor: " + value);
+    }
+
+    return { value.substr(0, separator), value.substr(separator + 1) };
+}
 
 Arguments parse_arguments(int argc, char* argv[])
 {
@@ -106,17 +132,10 @@ Arguments parse_arguments(int argc, char* argv[])
         else if (key == "--max-frames") args.max_frames = std::stoi(value);
         else if (key == "--bloco") args.tile = std::stoi(value);
         else if (key == "--margem") args.margin = std::stoi(value);
-        else if (key == "--ort-option")
-        {
-            const std::size_t separator = value.find('=');
-
-            if (separator == std::string::npos)
-            {
-                throw std::runtime_error("--ort-option espera chave=valor: " + value);
-            }
-
-            args.ort_options.emplace_back(value.substr(0, separator), value.substr(separator + 1));
-        }
+        else if (key == "--padrao-memoria") args.memory_pattern = std::stoi(value) != 0;
+        else if (key == "--ort-option") args.ort_options.push_back(key_value(key, value));
+        else if (key == "--ort-config") args.session_configs.push_back(key_value(key, value));
+        else if (key == "--ort-run-config") args.run_configs.push_back(key_value(key, value));
         else throw std::runtime_error("argumento desconhecido: " + key);
     }
 
@@ -129,7 +148,8 @@ Arguments parse_arguments(int argc, char* argv[])
             "uso:\n"
             "  sepconv_engine.exe --model m.onnx --one a.png --two b.png --out out.png [--runs N] [--warmup N]\n"
             "  sepconv_engine.exe --model m.onnx --video in.mkv --out out.mkv [--factor 2|4] [--max-frames N] [--warmup N]\n"
-            "  opcoes comuns: [--bloco T --margem M] [--csv resumo.csv] [--ort-option chave=valor]"
+            "  opcoes comuns: [--bloco T --margem M] [--csv resumo.csv] [--ort-option chave=valor]\n"
+            "                 [--ort-config chave=valor] [--ort-run-config chave=valor] [--padrao-memoria 0|1]"
         );
     }
 
@@ -180,12 +200,18 @@ void add_cuda_dll_directory()
 // Memoria de video da GPU inteira (MiB), segundo a NVML.
 // No Windows (WDDM) a NVML nao informa o uso por processo, por isso o
 // consumo do motor e obtido pela diferenca em relacao a linha de base.
+//
+// Uma thread le a NVML a cada ~1 ms durante toda a execucao. Ler apenas
+// depois de cada inferencia perderia o pico quando o ONNX Runtime devolve
+// a memoria ao fim da execucao (memory.enable_memory_arena_shrinkage).
 struct VramMonitor
 {
     nvmlDevice_t device{};
     double total_mib = 0.0;
     double baseline_mib = 0.0;
-    double peak_mib = 0.0;
+    std::atomic<unsigned long long> peak_bytes{ 0 };
+    std::atomic<bool> running{ true };
+    std::thread poller;
 
     VramMonitor()
     {
@@ -201,19 +227,49 @@ struct VramMonitor
 
         total_mib = memory.total / (1024.0 * 1024.0);
         baseline_mib = memory.used / (1024.0 * 1024.0);
-        peak_mib = baseline_mib;
+        peak_bytes = memory.used;
+
+        // Resolucao de 1 ms para o sleep_for (o padrao do Windows e ~15 ms).
+        timeBeginPeriod(1);
+        poller = std::thread([this] {
+            while (running)
+            {
+                sample();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
     }
 
     ~VramMonitor()
     {
+        running = false;
+        poller.join();
+        timeEndPeriod(1);
         nvmlShutdown();
     }
+
+    VramMonitor(const VramMonitor&) = delete;
+    VramMonitor& operator=(const VramMonitor&) = delete;
 
     void sample()
     {
         nvmlMemory_t memory{};
-        nvmlDeviceGetMemoryInfo(device, &memory);
-        peak_mib = std::max(peak_mib, memory.used / (1024.0 * 1024.0));
+
+        if (nvmlDeviceGetMemoryInfo(device, &memory) != NVML_SUCCESS)
+        {
+            return;
+        }
+
+        unsigned long long peak = peak_bytes;
+
+        while (memory.used > peak && !peak_bytes.compare_exchange_weak(peak, memory.used))
+        {
+        }
+    }
+
+    double peak_mib() const
+    {
+        return peak_bytes / (1024.0 * 1024.0);
     }
 
     // Com a VRAM praticamente cheia o driver do Windows passa a usar a
@@ -221,7 +277,7 @@ struct VramMonitor
     // muito a latencia. Esses resultados precisam ser sinalizados.
     bool saturated() const
     {
-        return peak_mib >= 0.97 * total_mib;
+        return peak_mib() >= 0.97 * total_mib;
     }
 };
 
@@ -608,6 +664,24 @@ private:
         Ort::SessionOptions session_options;
         session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
+        if (!args.memory_pattern)
+        {
+            session_options.DisableMemPattern();
+            std::cout << "Padrao de memoria do ONNX Runtime desativado\n";
+        }
+
+        for (const auto& [key, value] : args.session_configs)
+        {
+            session_options.AddConfigEntry(key.c_str(), value.c_str());
+            std::cout << "Configuracao da sessao: " << key << "=" << value << "\n";
+        }
+
+        for (const auto& [key, value] : args.run_configs)
+        {
+            run_options_.AddConfigEntry(key.c_str(), value.c_str());
+            std::cout << "Configuracao de cada execucao: " << key << "=" << value << "\n";
+        }
+
         const OrtApi& api = Ort::GetApi();
         OrtCUDAProviderOptionsV2* cuda_options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&cuda_options));
@@ -778,8 +852,8 @@ void print_report(const StageTimes& times, const VramMonitor& vram, const SepCon
               << "  Capacidade:               " << vram.total_mib << " MiB\n"
               << "  Linha de base:            " << vram.baseline_mib << " MiB\n"
               << "  Buffers do motor:         " << engine.buffers_mib() << " MiB (calculado)\n"
-              << "  Pico observado:           " << vram.peak_mib << " MiB\n"
-              << "  Consumo do motor (pico):  " << vram.peak_mib - vram.baseline_mib << " MiB\n";
+              << "  Pico observado:           " << vram.peak_mib() << " MiB\n"
+              << "  Consumo do motor (pico):  " << vram.peak_mib() - vram.baseline_mib << " MiB\n";
 
     if (vram.saturated())
     {
@@ -814,8 +888,8 @@ void append_csv(const std::string& path, const StageTimes& times, const VramMoni
         << mean(times.upload) << ',' << mean(times.preprocess) << ',' << mean(times.inference) << ','
         << mean(times.sepconv) << ',' << mean(times.download) << ',' << mean(times.total) << ','
         << stddev(times.total) << ',' << summary.written_frames << ',' << summary.wall_seconds << ','
-        << vram.total_mib << ',' << vram.baseline_mib << ',' << vram.peak_mib << ','
-        << vram.peak_mib - vram.baseline_mib << ',' << (vram.saturated() ? 1 : 0) << ','
+        << vram.total_mib << ',' << vram.baseline_mib << ',' << vram.peak_mib() << ','
+        << vram.peak_mib() - vram.baseline_mib << ',' << (vram.saturated() ? 1 : 0) << ','
         << summary.tile << ',' << (summary.tile > 0 ? summary.margin : 0) << '\n';
 
     std::cout << "Resumo acrescentado em: " << path << "\n";

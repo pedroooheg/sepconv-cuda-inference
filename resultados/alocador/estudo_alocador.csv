@@ -1,0 +1,66 @@
+resolucao,bloco,configuracao,descricao,falhou,medicoes,total_ms,total_desvio_ms,inferencia_ms,vram_consumo_mib,buffers_motor_mib,ort_e_contexto_mib,vram_saturada,dif_max_vs_padrao
+1080p,0,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,307.272,0.974,274.631,6646,1679,4967,0,0
+1080p,0,padrao_repetido,"Configuração atual, repetida",0,7,305.413,0.696,272.898,6641,1679,4962,0,1
+1080p,0,potencia_de_dois,Arena cresce em potências de dois (padrão do ORT),0,7,305.198,1.171,273.170,6929,1679,5250,0,1
+1080p,0,heuristica,Algoritmo do cuDNN por heurística,0,7,306.177,1.524,273.229,6643,1679,4964,0,1
+1080p,0,sem_workspace_maximo,Workspace do cuDNN limitado,0,7,305.977,1.435,273.781,6643,1679,4964,0,1
+1080p,0,pesos_fora_da_arena,Pesos alocados fora da arena,0,7,305.977,1.283,273.436,6650,1679,4971,0,1
+1080p,0,sem_padrao_de_memoria,Sem planejamento de memória,0,7,305.696,1.052,273.267,4743,1679,3064,0,1
+1080p,0,liberar_arena,Arena liberada após cada execução,0,7,363.151,1.277,330.815,4743,1679,3064,0,1
+1080p,0,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,306.200,0.867,273.331,4885,1679,3206,0,1
+1080p,0,combinado,"Todas as opções acima, exceto potências de dois",0,7,341.017,1.907,308.578,4743,1679,3064,0,1
+1080p,1024,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,425.345,2.267,392.496,4163,1117,3046,0,0
+1080p,1024,padrao_repetido,"Configuração atual, repetida",0,7,422.241,3.234,389.628,4163,1117,3045,0,0
+1080p,1024,potencia_de_dois,Arena cresce em potências de dois (padrão do ORT),0,7,422.831,4.871,389.937,5355,1117,4237,0,0
+1080p,1024,heuristica,Algoritmo do cuDNN por heurística,0,7,423.896,4.411,391.061,4163,1117,3045,0,0
+1080p,1024,sem_workspace_maximo,Workspace do cuDNN limitado,0,7,423.803,2.572,390.602,4163,1117,3045,0,0
+1080p,1024,pesos_fora_da_arena,Pesos alocados fora da arena,0,7,422.397,1.806,389.766,4167,1117,3050,0,0
+1080p,1024,sem_padrao_de_memoria,Sem planejamento de memória,0,7,423.191,1.241,390.424,3055,1117,1937,0,0
+1080p,1024,liberar_arena,Arena liberada após cada execução,0,7,554.278,7.991,521.690,3971,1117,2853,0,0
+1080p,1024,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,420.090,1.381,387.396,3301,1117,2183,0,0
+1080p,1024,combinado,"Todas as opções acima, exceto potências de dois",0,7,476.676,2.785,443.955,3055,1117,1937,0,0
+1080p,512,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,650.942,5.258,616.285,2170,462,1708,0,0
+1080p,512,padrao_repetido,"Configuração atual, repetida",0,7,650.415,3.417,615.733,2168,462,1706,0,0
+1080p,512,potencia_de_dois,Arena cresce em potências de dois (padrão do ORT),0,7,658.099,8.800,623.317,1625,462,1162,0,0
+1080p,512,heuristica,Algoritmo do cuDNN por heurística,0,7,653.151,6.261,618.562,2171,462,1708,0,0
+1080p,512,sem_workspace_maximo,Workspace do cuDNN limitado,0,7,653.915,7.540,619.312,2172,462,1710,0,0
+1080p,512,pesos_fora_da_arena,Pesos alocados fora da arena,0,7,650.007,2.488,615.492,2171,462,1708,0,0
+1080p,512,sem_padrao_de_memoria,Sem planejamento de memória,0,7,650.636,4.514,615.933,1831,462,1368,0,0
+1080p,512,liberar_arena,Arena liberada após cada execução,0,7,828.014,7.562,793.071,1634,462,1171,0,0
+1080p,512,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,652.985,4.665,618.366,1631,462,1168,0,0
+1080p,512,combinado,"Todas as opções acima, exceto potências de dois",0,7,742.172,4.382,707.103,1291,462,828,0,0
+1080p,256,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,1142.381,11.620,1103.037,985,226,759,0,0
+1080p,256,padrao_repetido,"Configuração atual, repetida",0,7,1141.350,5.091,1102.191,989,226,763,0,0
+1080p,256,potencia_de_dois,Arena cresce em potências de dois (padrão do ORT),0,7,1130.653,5.146,1091.334,879,226,653,0,0
+1080p,256,heuristica,Algoritmo do cuDNN por heurística,0,7,1149.559,8.095,1110.059,985,226,759,0,0
+1080p,256,sem_workspace_maximo,Workspace do cuDNN limitado,0,7,1153.434,6.857,1113.871,985,226,759,0,0
+1080p,256,pesos_fora_da_arena,Pesos alocados fora da arena,0,7,1157.255,9.186,1118.062,990,226,764,0,0
+1080p,256,sem_padrao_de_memoria,Sem planejamento de memória,0,7,1192.431,22.093,1152.518,871,226,645,0,0
+1080p,256,liberar_arena,Arena liberada após cada execução,0,7,1463.728,8.126,1424.605,821,226,595,0,0
+1080p,256,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,1163.401,7.255,1124.175,627,226,401,0,0
+1080p,256,combinado,"Todas as opções acima, exceto potências de dois",0,7,1358.737,15.274,1319.480,711,226,485,0,0
+1440p,0,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,7661.513,4.484,7545.563,7115,2985,4130,1,0
+1440p,0,padrao_repetido,"Configuração atual, repetida",0,7,7488.915,4.318,7372.705,7201,2985,4217,1,1
+1440p,0,sem_padrao_de_memoria,Sem planejamento de memória,0,7,4095.329,4.137,3979.003,7257,2985,4272,1,1
+1440p,0,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,2640.937,2.794,2581.510,7247,2985,4263,1,1
+1440p,0,combinado,"Todas as opções acima, exceto potências de dois",0,7,4410.419,11.634,4356.130,7261,2985,4276,1,1
+1440p,1024,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,725.166,3.369,667.435,5805,1300,4504,0,0
+1440p,1024,padrao_repetido,"Configuração atual, repetida",0,7,726.656,5.852,668.515,5805,1300,4504,0,0
+1440p,1024,sem_padrao_de_memoria,Sem planejamento de memória,0,7,725.338,6.079,667.118,4655,1300,3354,0,0
+1440p,1024,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,723.948,3.402,666.066,3501,1300,2201,0,0
+1440p,1024,combinado,"Todas as opções acima, exceto potências de dois",0,7,830.545,10.472,772.474,3385,1300,2084,0,0
+1440p,512,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,7,934.645,10.235,874.073,2248,513,1735,0,0
+1440p,512,padrao_repetido,"Configuração atual, repetida",0,7,932.355,6.699,872.045,2247,513,1734,0,0
+1440p,512,sem_padrao_de_memoria,Sem planejamento de memória,0,7,934.089,4.267,873.759,1911,513,1398,0,0
+1440p,512,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,7,935.889,4.022,875.517,1683,513,1170,0,0
+1440p,512,combinado,"Todas as opções acima, exceto potências de dois",0,7,1061.323,9.215,1000.507,1323,513,810,0,0
+2160p,1024,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,3,1805.186,3.797,1538.084,7247,1446,5801,1,0
+2160p,1024,padrao_repetido,"Configuração atual, repetida",0,3,1805.231,0.946,1537.787,7349,1446,5903,1,0
+2160p,1024,sem_padrao_de_memoria,Sem planejamento de memória,0,3,1663.925,0.559,1533.661,6242,1446,4796,0,0
+2160p,1024,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,3,1667.621,2.647,1536.760,4655,1446,3209,0,0
+2160p,1024,combinado,"Todas as opções acima, exceto potências de dois",0,3,1859.833,5.257,1730.160,3687,1446,2241,0,0
+2160p,512,padrao,"Configuração atual (kSameAsRequested, busca exaustiva)",0,3,2237.445,3.062,2099.622,2393,658,1735,0,0
+2160p,512,padrao_repetido,"Configuração atual, repetida",0,3,2277.105,4.886,2138.680,2389,658,1731,0,0
+2160p,512,sem_padrao_de_memoria,Sem planejamento de memória,0,3,2254.076,4.520,2116.851,2049,658,1391,0,0
+2160p,512,sem_padrao_potencia_de_dois,"Sem planejamento de memória, arena em potências de dois",0,3,2250.975,6.290,2113.310,1831,658,1173,0,0
+2160p,512,combinado,"Todas as opções acima, exceto potências de dois",0,3,2528.657,2.342,2390.235,1469,658,811,0,0
