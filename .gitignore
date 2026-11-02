@@ -20,6 +20,10 @@ modelos/
 *.mkv
 desktop.ini
 
+# Conjuntos de avaliacao baixados e quadros sintetizados a partir deles
+dados/vimeo90k/
+resultados/conjuntos/*/saidas/
+
 # Arquivos temporários do LaTeX / IDEs
 .vscode/
 .idea/
