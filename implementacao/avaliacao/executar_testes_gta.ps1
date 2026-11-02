@@ -1,23 +1,26 @@
 # Bateria de testes com os videos do GTA VI: C++ x Python.
 #
-# Para cada resolucao, cada implementacao (motor C++ com o quadro inteiro,
-# motor C++ em blocos de cada tamanho de -Blocos e Python) interpola 2x o
-# video de 15 FPS (mede desempenho e VRAM) e o resultado e comparado com o
-# video real de 30 FPS (mede PSNR/SSIM/VMAF). Tudo fica em
-# resultados\testes_gta\<data_hora>\.
+# Para cada resolucao, cada serie de -Series interpola 2x o video de 15 FPS
+# (mede desempenho e VRAM) e o resultado e comparado com o video real de
+# 30 FPS (mede PSNR/SSIM/VMAF). Tudo fica em resultados\testes_gta\<data_hora>\.
+#
+# Series (os mesmos rotulos que o motor grava no CSV):
+#   python             implementacao original em PyTorch
+#   cpp                motor C++ com o quadro inteiro
+#   cpp_b<T>           motor C++ em blocos T x T (margem -Margem)
+#   sufixo _fp16       modelo em meia precisao (cpp_fp16, cpp_b1024_fp16, ...)
 #
 # Uso (na raiz do projeto):
 #   .\implementacao\avaliacao\executar_testes_gta.ps1
 #   .\implementacao\avaliacao\executar_testes_gta.ps1 -Resolucoes 720p,1080p
 #   .\implementacao\avaliacao\executar_testes_gta.ps1 -Incluir4K -QuadrosMax4K 5
-#   .\implementacao\avaliacao\executar_testes_gta.ps1 -Blocos 1024,512,256 -Margem 96
-#   .\implementacao\avaliacao\executar_testes_gta.ps1 -Blocos @()    (so a v1)
+#   .\implementacao\avaliacao\executar_testes_gta.ps1 -Series cpp,cpp_b1024,cpp_b512,cpp_b256,python   (bateria v2)
 
 param(
     [string[]] $Resolucoes = @("720p", "1080p", "1440p"),
     [switch] $Incluir4K,
     [int] $QuadrosMax4K = 5,
-    [int[]] $Blocos = @(512, 256),
+    [string[]] $Series = @("cpp", "cpp_fp16", "cpp_b1024_fp16", "cpp_b512_fp16", "python"),
     [int] $Margem = 96
 )
 
@@ -28,16 +31,28 @@ Set-Location $Raiz
 
 $Motor = "implementacao\motor_cpp\build\Release\sepconv_engine.exe"
 $Python = "venv\Scripts\python.exe"
-$Modelo = "modelos\sepconv_paper.onnx"
-$ModeloBlocos = "modelos\sepconv_blocos.onnx"
 $Pasta = "resultados\testes_gta\" + (Get-Date -Format "yyyy-MM-dd_HH-mm")
 
-$Necessarios = @($Motor, $Python, $Modelo)
-if ($Blocos.Count -gt 0) { $Necessarios += $ModeloBlocos }
+# Modelo e argumentos do motor para cada serie C++.
+function Configuracao([string] $Serie) {
+    if ($Serie -notmatch '^cpp(_b(\d+))?(_fp16)?$') {
+        throw "Serie desconhecida: $Serie"
+    }
 
-foreach ($Arquivo in $Necessarios) {
+    $Bloco = if ($Matches[2]) { [int] $Matches[2] } else { 0 }
+    $Nome = if ($Bloco -gt 0) { "sepconv_blocos" } else { "sepconv_paper" }
+    $Sufixo = if ($Matches[3]) { "_fp16" } else { "" }
+    $Argumentos = if ($Bloco -gt 0) { @("--bloco", "$Bloco", "--margem", "$Margem") } else { @() }
+
+    return @{ Modelo = "modelos\$Nome$Sufixo.onnx"; Argumentos = $Argumentos }
+}
+
+$Necessarios = @($Motor, $Python) + @($Series | Where-Object { $_ -ne "python" } | ForEach-Object { (Configuracao $_).Modelo })
+
+foreach ($Arquivo in ($Necessarios | Select-Object -Unique)) {
     if (-not (Test-Path $Arquivo)) {
         Write-Host "Nao encontrado: $Arquivo" -ForegroundColor Red
+        Write-Host "  (os modelos FP16 sao gerados por implementacao\fp16\converter_fp16.py)"
         exit 1
     }
 }
@@ -64,32 +79,27 @@ function Testar([string] $Res, [int] $MaxQuadros) {
     # medicoes suficientes.
     if ($MaxQuadros -gt 0) { $Extra = @("--max-frames", "$MaxQuadros", "--warmup", "1") }
 
-    # Os rotulos sao os mesmos que o motor grava no CSV (cpp, cpp_b512, ...).
-    $Implementacoes = @("cpp") + @($Blocos | ForEach-Object { "cpp_b$_" }) + @("python")
+    foreach ($Serie in $Series) {
+        $Video = "$Pasta\saidas\${Serie}_${Res}.mkv"
 
-    foreach ($Impl in $Implementacoes) {
-        $Video = "$Pasta\saidas\${Impl}_${Res}.mkv"
+        Write-Host "`n========== $Serie | $Res ==========" -ForegroundColor Cyan
 
-        Write-Host "`n========== $Impl | $Res ==========" -ForegroundColor Cyan
-
-        if ($Impl -eq "cpp") {
-            & $Motor --model $Modelo --video $Entrada --out $Video --factor 2 --csv "$Pasta\desempenho.csv" @Extra
-        }
-        elseif ($Impl -like "cpp_b*") {
-            $Bloco = $Impl.Substring(5)
-            & $Motor --model $ModeloBlocos --video $Entrada --out $Video --factor 2 --bloco $Bloco --margem $Margem --csv "$Pasta\desempenho.csv" @Extra
+        if ($Serie -eq "python") {
+            & $Python implementacao\avaliacao\benchmark_python.py --video $Entrada --out $Video --factor 2 --csv "$Pasta\desempenho.csv" @Extra
         }
         else {
-            & $Python implementacao\avaliacao\benchmark_python.py --video $Entrada --out $Video --factor 2 --csv "$Pasta\desempenho.csv" @Extra
+            $Config = Configuracao $Serie
+            $Argumentos = $Config.Argumentos
+            & $Motor --model $Config.Modelo --video $Entrada --out $Video --factor 2 --csv "$Pasta\desempenho.csv" @Argumentos @Extra
         }
 
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "FALHOU: $Impl $Res" -ForegroundColor Red
-            Add-Content "$Pasta\falhas.csv" "$Impl,$Res"
+            Write-Host "FALHOU: $Serie $Res" -ForegroundColor Red
+            Add-Content "$Pasta\falhas.csv" "$Serie,$Res"
             continue
         }
 
-        & $Python implementacao\avaliacao\avaliar_qualidade.py --referencia $Referencia --interpolado $Video --rotulo $Impl --csv "$Pasta\qualidade.csv" --csv-quadros "$Pasta\quadros\${Impl}_${Res}.csv"
+        & $Python implementacao\avaliacao\avaliar_qualidade.py --referencia $Referencia --interpolado $Video --rotulo $Serie --csv "$Pasta\qualidade.csv" --csv-quadros "$Pasta\quadros\${Serie}_${Res}.csv"
     }
 }
 

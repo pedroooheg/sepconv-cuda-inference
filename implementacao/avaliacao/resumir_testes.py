@@ -26,12 +26,14 @@ def resolucao(nome_arquivo):
 
 
 def ordem_implementacao(implementacao):
-    """cpp, cpp_b<T> do maior bloco ao menor, python."""
-    if implementacao == "cpp":
-        return (0, 0)
+    """cpp e cpp_fp16, cpp_b<T>[_fp16] do maior bloco ao menor, python."""
+    encontrado = re.fullmatch(r"cpp(?:_b(\d+))?(_fp16)?", implementacao)
 
-    bloco = re.fullmatch(r"cpp_b(\d+)", implementacao)
-    return (1, -int(bloco.group(1))) if bloco else (2, 0)
+    if not encontrado:
+        return (2, 0, 0)
+
+    bloco = int(encontrado.group(1) or 0)
+    return (1 if bloco else 0, -bloco, bool(encontrado.group(2)))
 
 
 def main():

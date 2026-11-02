@@ -1,0 +1,5 @@
+implementacao,referencia,quadro,psnr,ssim,vmaf
+cpp_b512_fp16,gta_2160p_30fps.mkv,1,33.0774,0.951673,51.3409
+cpp_b512_fp16,gta_2160p_30fps.mkv,3,29.6467,0.911289,41.1941
+cpp_b512_fp16,gta_2160p_30fps.mkv,5,31.1405,0.929347,52.6873
+cpp_b512_fp16,gta_2160p_30fps.mkv,7,31.8942,0.936923,55.9534

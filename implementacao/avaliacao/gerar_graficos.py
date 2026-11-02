@@ -39,6 +39,7 @@ from matplotlib.ticker import FuncFormatter
 # =============================================================
 
 COR_CPP = "#2a78d6"      # azul
+COR_CPP_FP16 = "#18508f" # azul escuro: mesmo motor, quadro inteiro, em FP16
 COR_PYTHON = "#eb6834"   # laranja
 # Motor em blocos: cada tamanho de bloco tem sempre o mesmo estilo, em
 # todos os graficos (outros tamanhos usam o estilo pela ordem).
@@ -116,18 +117,21 @@ def salvar(figura, pasta, nome):
 # =============================================================
 
 def bloco_de(implementacao):
-    encontrado = re.fullmatch(r"cpp_b(\d+)", implementacao)
+    encontrado = re.fullmatch(r"cpp_b(\d+)(?:_fp16)?", implementacao)
     return int(encontrado.group(1)) if encontrado else 0
 
 
+def fp16_de(implementacao):
+    return implementacao.startswith("cpp") and implementacao.endswith("_fp16")
+
+
 def ordenar_series(implementacoes):
-    """cpp, cpp_b<T> do maior bloco ao menor, python."""
+    """cpp e cpp_fp16 (quadro inteiro), cpp_b<T>[_fp16] do maior bloco ao
+    menor, python."""
     def chave(implementacao):
-        if implementacao == "cpp":
-            return (0, 0)
-        if bloco_de(implementacao):
-            return (1, -bloco_de(implementacao))
-        return (2, 0)
+        if not implementacao.startswith("cpp"):
+            return (2, 0, 0)
+        return (1 if bloco_de(implementacao) else 0, -bloco_de(implementacao), fp16_de(implementacao))
 
     return sorted(set(implementacoes), key=chave)
 
@@ -141,10 +145,14 @@ class Estilo:
         self.indice_bloco = {
             s: ESTILO_DO_BLOCO.get(bloco_de(s), i % len(CORES_BLOCOS)) for i, s in enumerate(blocos)
         }
+        # Com alguma serie em FP16, as demais series C++ sao rotuladas FP32.
+        self.ha_fp16 = any(fp16_de(s) for s in series)
 
     def cor(self, serie):
         if serie == "cpp":
             return COR_CPP
+        if serie == "cpp_fp16":
+            return COR_CPP_FP16
         if serie in self.indice_bloco:
             return CORES_BLOCOS[self.indice_bloco[serie]]
         return COR_PYTHON
@@ -157,30 +165,35 @@ class Estilo:
     def marcador(self, serie):
         if serie in self.indice_bloco:
             return MARCADORES_BLOCOS[self.indice_bloco[serie]]
-        return "o"
+        return "p" if serie == "cpp_fp16" else "o"
+
+    def precisao(self, serie):
+        if fp16_de(serie):
+            return " FP16"
+        return " FP32" if self.ha_fp16 else ""
 
     def nome(self, serie):
-        if serie == "cpp":
-            return "C++/CUDA, quadro inteiro" if self.indice_bloco else "C++/CUDA (ONNX Runtime)"
+        if not serie.startswith("cpp"):
+            return "Python/PyTorch (original)"
         if bloco_de(serie):
             lado = bloco_de(serie)
-            return f"C++/CUDA, blocos {lado}×{lado}"
-        return "Python/PyTorch (original)"
+            return f"C++/CUDA{self.precisao(serie)}, blocos {lado}×{lado}"
+        if self.indice_bloco or self.ha_fp16:
+            return f"C++/CUDA{self.precisao(serie)}, quadro inteiro"
+        return "C++/CUDA (ONNX Runtime)"
 
     def nome_curto(self, serie):
-        if serie == "cpp":
-            return "C++"
-        if bloco_de(serie):
-            return f"C++ b{bloco_de(serie)}"
-        return "Python"
+        if not serie.startswith("cpp"):
+            return "Python"
+        return "C++" + self.precisao(serie) + (f" b{bloco_de(serie)}" if bloco_de(serie) else "")
 
     def nome_tabela(self, serie):
-        if serie == "cpp":
-            return "C++/CUDA" if not self.indice_bloco else "C++/CUDA (inteiro)"
-        if bloco_de(serie):
-            lado = bloco_de(serie)
-            return f"C++/CUDA (blocos {lado})"
-        return "Python/PyTorch"
+        if not serie.startswith("cpp"):
+            return "Python/PyTorch"
+        if not (self.indice_bloco or self.ha_fp16):
+            return "C++/CUDA"
+        regiao = f"blocos {bloco_de(serie)}" if bloco_de(serie) else "inteiro"
+        return f"C++/CUDA{self.precisao(serie)} ({regiao})"
 
 
 # =============================================================
@@ -491,7 +504,8 @@ def grafico_etapas(desempenho, resolucoes, estilo, pasta):
     def rotulo(resolucao, serie):
         if len(variantes) == 1:
             return resolucao
-        return f"{resolucao} · {'inteiro' if serie == 'cpp' else f'b{bloco_de(serie)}'}"
+        regiao = f"b{bloco_de(serie)}" if bloco_de(serie) else "inteiro"
+        return f"{resolucao} · {regiao}" + (" FP16" if fp16_de(serie) else "")
 
     figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, (0.55 if len(variantes) == 1 else 0.45) * len(barras) + 1.2))
 
@@ -586,7 +600,11 @@ def grafico_psnr_quadros(quadros, resolucoes, pasta):
     for cor, (resolucao, serie, linhas) in zip(cores, series):
         xs = [int(linha["quadro"]) for linha in linhas]
         ys = [float(linha["psnr"]) for linha in linhas]
-        rotulo = resolucao if serie == "cpp" else f"{resolucao} (blocos {bloco_de(serie)})"
+        if serie == "cpp":
+            rotulo = resolucao
+        else:
+            detalhes = ([f"blocos {bloco_de(serie)}"] if bloco_de(serie) else []) + (["FP16"] if fp16_de(serie) else [])
+            rotulo = f"{resolucao} ({', '.join(detalhes)})"
         eixo.plot(xs, ys, color=cor, linewidth=2, marker="o", markersize=4, label=rotulo)
 
     eixo.yaxis.set_major_formatter(formatador())

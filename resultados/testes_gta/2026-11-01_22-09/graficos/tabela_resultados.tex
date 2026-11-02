@@ -1,0 +1,37 @@
+% Gerado por implementacao/avaliacao/gerar_graficos.py
+\begin{table}[htb]
+\centering
+\caption{Desempenho e fidelidade visual por resolução (interpolação 2$\times$)}
+\label{tab:resultados_gta}
+\small
+\begin{tabular}{llrrrrr}
+\toprule
+\textbf{Resolução} & \textbf{Implementação} & \textbf{ms/quadro} & \textbf{VRAM (MiB)} & \textbf{PSNR (dB)} & \textbf{SSIM} & \textbf{VMAF} \\
+\midrule
+720p & C++/CUDA FP32 (inteiro) & 134,4 & 2.944 & 34,48 & 0,9622 & 85,16 \\
+720p & C++/CUDA FP16 (inteiro) & 80,8 & 1.554 & 34,48 & 0,9622 & 85,16 \\
+720p & C++/CUDA FP16 (blocos 1024) & 164,7 & 1.568 & 34,48 & 0,9622 & 85,16 \\
+720p & C++/CUDA FP16 (blocos 512) & 403,0 & 893 & 34,48 & 0,9622 & 85,16 \\
+720p & Python/PyTorch & 175,3 & 2.149 & 34,48 & 0,9622 & 85,16 \\
+\midrule
+1080p & C++/CUDA FP32 (inteiro) & 306,2 & 4.887 & 34,10 & 0,9538 & 77,43 \\
+1080p & C++/CUDA FP16 (inteiro) & 183,0 & 3.049 & 34,10 & 0,9538 & 77,42 \\
+1080p & C++/CUDA FP16 (blocos 1024) & 401,0 & 2.855 & 34,10 & 0,9538 & 77,42 \\
+1080p & C++/CUDA FP16 (blocos 512) & 696,8 & 920 & 34,10 & 0,9538 & 77,43 \\
+1080p & Python/PyTorch & 406,3 & 4.582 & 34,10 & 0,9538 & 77,42 \\
+\midrule
+1440p & C++/CUDA FP32 (inteiro) & 2.694,7$^{*}$ & 7.149 & 34,04 & 0,9532 & 71,91 \\
+1440p & C++/CUDA FP16 (inteiro) & 329,0 & 4.800 & 34,04 & 0,9532 & 71,90 \\
+1440p & C++/CUDA FP16 (blocos 1024) & 570,3 & 2.915 & 34,04 & 0,9532 & 71,90 \\
+1440p & C++/CUDA FP16 (blocos 512) & 816,7 & 979 & 34,04 & 0,9532 & 71,90 \\
+1440p & Python/PyTorch & 1.345,8$^{*}$ & 7.204 & 34,04 & 0,9532 & 71,91 \\
+\midrule
+2160p & C++/CUDA FP32 (inteiro) & \multicolumn{5}{c}{falhou por falta de memória} \\
+2160p & C++/CUDA FP16 (inteiro) & 9.502,7$^{*}$ & 7.370 & 31,44 & 0,9323 & 50,27 \\
+2160p & C++/CUDA FP16 (blocos 1024) & 1.187,7 & 3.061 & 31,44 & 0,9323 & 50,33 \\
+2160p & C++/CUDA FP16 (blocos 512) & 1.808,1 & 1.127 & 31,44 & 0,9323 & 50,29 \\
+2160p & Python/PyTorch & 66.594,4$^{*}$ & 7.357 & 31,44 & 0,9323 & 50,33 \\
+\bottomrule
+\end{tabular}
+\legend{$^{*}$ VRAM saturada durante a execução. Motor em blocos com margem de 96 pixels. Fonte: Elaborado pelo autor (2026)}
+\end{table}
