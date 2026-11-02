@@ -25,6 +25,15 @@ def resolucao(nome_arquivo):
     return encontrado.group(1) if encontrado else nome_arquivo
 
 
+def ordem_implementacao(implementacao):
+    """cpp, cpp_b<T> do maior bloco ao menor, python."""
+    if implementacao == "cpp":
+        return (0, 0)
+
+    bloco = re.fullmatch(r"cpp_b(\d+)", implementacao)
+    return (1, -int(bloco.group(1))) if bloco else (2, 0)
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__)
@@ -64,7 +73,7 @@ def main():
         "|---|---|---|---|---|---|---|---|",
     ]
 
-    for (res, implementacao) in sorted(linhas, key=lambda c: (ordem.get(c[0], 9), c[1])):
+    for (res, implementacao) in sorted(linhas, key=lambda c: (ordem.get(c[0], 9), ordem_implementacao(c[1]))):
         dados = linhas[(res, implementacao)]
         tabela.append(
             f"| {res} | {implementacao} | {dados.get('ms', '-')} | {dados.get('vram', '-')} | "

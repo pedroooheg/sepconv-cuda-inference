@@ -11,12 +11,16 @@ bateria e grava em <pasta>/graficos/ (PDF vetorial + PNG 300 dpi):
   psnr_quadros.*    PSNR de cada quadro sintetizado (motor C++)
   tabela_resultados.tex
 
+As series sao as implementacoes presentes nos CSV: cpp (quadro inteiro),
+cpp_b<T> (motor em blocos T x T) e python.
+
 Uso:
     python implementacao/avaliacao/gerar_graficos.py resultados/testes_gta/<data_hora>
 """
 
 import csv
 import glob
+import math
 import os
 import re
 import sys
@@ -34,16 +38,15 @@ from matplotlib.ticker import FuncFormatter
 # Estilo
 # =============================================================
 
-COR = {
-    "cpp": "#2a78d6",      # azul
-    "python": "#eb6834",   # laranja
-}
-NOME = {
-    "cpp": "C++/CUDA (ONNX Runtime)",
-    "python": "Python/PyTorch (original)",
-}
-# Hachura no Python para manter a distincao em impressao preto e branco.
-HACHURA = {"cpp": "", "python": "///"}
+COR_CPP = "#2a78d6"      # azul
+COR_PYTHON = "#eb6834"   # laranja
+# Motor em blocos: cada tamanho de bloco tem sempre o mesmo estilo, em
+# todos os graficos (outros tamanhos usam o estilo pela ordem).
+CORES_BLOCOS = ["#1baf7a", "#eda100", "#e87ba4"]
+# Hachuras mantem a distincao em impressao preto e branco.
+HACHURAS_BLOCOS = ["...", "xxx", "\\\\\\"]
+MARCADORES_BLOCOS = ["s", "^", "D"]
+ESTILO_DO_BLOCO = {1024: 0, 512: 1, 256: 2}
 
 CORES_ETAPAS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4"]
 # Tons de azul do mais claro (720p) ao mais escuro (2160p).
@@ -109,6 +112,78 @@ def salvar(figura, pasta, nome):
 
 
 # =============================================================
+# Series (implementacoes)
+# =============================================================
+
+def bloco_de(implementacao):
+    encontrado = re.fullmatch(r"cpp_b(\d+)", implementacao)
+    return int(encontrado.group(1)) if encontrado else 0
+
+
+def ordenar_series(implementacoes):
+    """cpp, cpp_b<T> do maior bloco ao menor, python."""
+    def chave(implementacao):
+        if implementacao == "cpp":
+            return (0, 0)
+        if bloco_de(implementacao):
+            return (1, -bloco_de(implementacao))
+        return (2, 0)
+
+    return sorted(set(implementacoes), key=chave)
+
+
+class Estilo:
+    """Cor, hachura, marcador e nomes de cada serie."""
+
+    def __init__(self, series):
+        self.series = series
+        blocos = [s for s in series if bloco_de(s)]
+        self.indice_bloco = {
+            s: ESTILO_DO_BLOCO.get(bloco_de(s), i % len(CORES_BLOCOS)) for i, s in enumerate(blocos)
+        }
+
+    def cor(self, serie):
+        if serie == "cpp":
+            return COR_CPP
+        if serie in self.indice_bloco:
+            return CORES_BLOCOS[self.indice_bloco[serie]]
+        return COR_PYTHON
+
+    def hachura(self, serie):
+        if serie in self.indice_bloco:
+            return HACHURAS_BLOCOS[self.indice_bloco[serie]]
+        return "///" if serie == "python" else ""
+
+    def marcador(self, serie):
+        if serie in self.indice_bloco:
+            return MARCADORES_BLOCOS[self.indice_bloco[serie]]
+        return "o"
+
+    def nome(self, serie):
+        if serie == "cpp":
+            return "C++/CUDA, quadro inteiro" if self.indice_bloco else "C++/CUDA (ONNX Runtime)"
+        if bloco_de(serie):
+            lado = bloco_de(serie)
+            return f"C++/CUDA, blocos {lado}×{lado}"
+        return "Python/PyTorch (original)"
+
+    def nome_curto(self, serie):
+        if serie == "cpp":
+            return "C++"
+        if bloco_de(serie):
+            return f"C++ b{bloco_de(serie)}"
+        return "Python"
+
+    def nome_tabela(self, serie):
+        if serie == "cpp":
+            return "C++/CUDA" if not self.indice_bloco else "C++/CUDA (inteiro)"
+        if bloco_de(serie):
+            lado = bloco_de(serie)
+            return f"C++/CUDA (blocos {lado})"
+        return "Python/PyTorch"
+
+
+# =============================================================
 # Leitura dos CSV
 # =============================================================
 
@@ -159,8 +234,9 @@ def carregar(pasta):
         {chave[0] for chave in list(desempenho) + list(falhas)},
         key=lambda r: ORDEM.index(r) if r in ORDEM else 99,
     )
+    series = ordenar_series(chave[1] for chave in list(desempenho) + list(falhas))
 
-    return desempenho, qualidade, falhas, quadros, resolucoes
+    return desempenho, qualidade, falhas, quadros, resolucoes, series
 
 
 def legenda_superior(eixo, alcas, colunas=None):
@@ -178,28 +254,63 @@ def legenda_superior(eixo, alcas, colunas=None):
 # Graficos
 # =============================================================
 
-def grafico_latencia(desempenho, falhas, resolucoes, pasta):
-    figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, 3.4))
+def espalhar_rotulos(figura, eixo, rotulos, distancia=12):
+    """Rotulos (x, valor, texto, dx, alinhamento) num eixo log: do mesmo lado
+    de um mesmo x, cada rotulo fica pelo menos `distancia` pontos acima do
+    anterior."""
+    baixo, alto = eixo.get_ylim()
+    altura_pontos = eixo.get_position().height * figura.get_figheight() * 72
+    pontos_por_decada = altura_pontos / math.log10(alto / baixo)
+
+    grupos = {}
+
+    for rotulo in rotulos:
+        grupos.setdefault((rotulo[0], rotulo[3]), []).append(rotulo)
+
+    for grupo in grupos.values():
+        anterior = -math.inf
+
+        for x, valor, texto, dx, alinhamento in sorted(grupo, key=lambda r: r[1]):
+            posicao = math.log10(valor) * pontos_por_decada
+            alvo = max(posicao, anterior + distancia)
+            anterior = alvo
+            eixo.annotate(texto, (x, valor), textcoords="offset points", xytext=(dx, alvo - posicao),
+                          ha=alinhamento, va="center", fontsize=7.5, color=TEXTO)
+
+
+def grafico_latencia(desempenho, falhas, resolucoes, estilo, pasta):
+    series = estilo.series
+    figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, 3.4 if len(series) <= 2 else 3.8))
     posicoes = range(len(resolucoes))
     houve_saturacao = False
     houve_falha = False
 
-    # Em cada resolucao, o rotulo do maior valor vai acima do ponto e o do
-    # menor vai abaixo, para os dois nao se sobreporem.
-    maior = {}
+    # Posicao do rotulo de cada ponto. Com duas series, o maior valor vai
+    # acima do ponto e o menor abaixo; com mais series, os rotulos alternam
+    # entre a esquerda e a direita na ordem dos valores, para que valores
+    # vizinhos nunca fiquem do mesmo lado, e sao afastados na vertical
+    # depois que a escala do eixo esta definida (ver espalhar_rotulos).
+    deslocamentos = {}
+    rotulos = []
 
     for resolucao in resolucoes:
-        valores = {i: float(desempenho[(resolucao, i)]["total_ms"])
-                   for i in ("cpp", "python") if (resolucao, i) in desempenho}
+        valores = {s: float(desempenho[(resolucao, s)]["total_ms"])
+                   for s in series if (resolucao, s) in desempenho}
 
-        if valores:
-            maior[resolucao] = max(valores, key=valores.get)
+        for posto, serie in enumerate(sorted(valores, key=valores.get)):
+            if len(series) <= 2:
+                acima = serie == max(valores, key=valores.get)
+                deslocamentos[(resolucao, serie)] = ((0, 9 if acima else -15), "center", "baseline")
+            elif posto % 2 == 0:
+                deslocamentos[(resolucao, serie)] = ((-8, 0), "right", "center")
+            else:
+                deslocamentos[(resolucao, serie)] = ((8, 0), "left", "center")
 
-    for implementacao in ("cpp", "python"):
+    for serie in series:
         xs, ys = [], []
 
         for x, resolucao in zip(posicoes, resolucoes):
-            linha = desempenho.get((resolucao, implementacao))
+            linha = desempenho.get((resolucao, serie))
 
             if linha is None:
                 continue
@@ -212,43 +323,51 @@ def grafico_latencia(desempenho, falhas, resolucoes, pasta):
 
             # Marcador vazado = medicao com a VRAM saturada.
             eixo.plot(
-                x, valor, "o", markersize=8,
-                markerfacecolor=SUPERFICIE if saturada else COR[implementacao],
-                markeredgecolor=COR[implementacao], markeredgewidth=2, zorder=3,
+                x, valor, estilo.marcador(serie), markersize=8 if estilo.marcador(serie) == "o" else 7,
+                markerfacecolor=SUPERFICIE if saturada else estilo.cor(serie),
+                markeredgecolor=estilo.cor(serie), markeredgewidth=2, zorder=3,
             )
 
-            deslocamento = 9 if maior.get(resolucao) == implementacao else -15
+            texto = f"{numero(valor / 1000, 1)} s" if valor >= 1000 else f"{numero(valor)} ms"
+            deslocamento, horizontal, vertical = deslocamentos[(resolucao, serie)]
+
+            if len(series) > 2:
+                rotulos.append((x, valor, texto, deslocamento[0], horizontal))
+                continue
+
             eixo.annotate(
-                f"{numero(valor / 1000, 1)} s" if valor >= 1000 else f"{numero(valor)} ms",
-                (x, valor), textcoords="offset points", xytext=(0, deslocamento),
-                ha="center", fontsize=8, color=TEXTO,
+                texto, (x, valor), textcoords="offset points", xytext=deslocamento,
+                ha=horizontal, va=vertical, fontsize=8, color=TEXTO,
             )
 
-        eixo.plot(xs, ys, color=COR[implementacao], linewidth=2, zorder=2)
+        eixo.plot(xs, ys, color=estilo.cor(serie), linewidth=2, zorder=2,
+                  linestyle="--" if bloco_de(serie) else "-")
 
     eixo.set_yscale("log")
     eixo.yaxis.set_major_formatter(formatador())
     eixo.set_xticks(list(posicoes), [rotulo_resolucao(r) for r in resolucoes])
-    eixo.set_xlim(-0.4, len(resolucoes) - 0.6)
+    eixo.set_xlim(-0.6 if len(series) > 2 else -0.4, len(resolucoes) - (0.4 if len(series) > 2 else 0.6))
     eixo.set_ylabel("Tempo por quadro interpolado (ms, escala log)")
 
     # Falhas ficam numa faixa acima do maior valor medido.
     baixo, alto = eixo.get_ylim()
     topo = alto * 4
     eixo.set_ylim(baixo / 1.8, topo * 1.6)
+    espalhar_rotulos(figura, eixo, rotulos)
 
     for x, resolucao in zip(posicoes, resolucoes):
-        for implementacao in ("cpp", "python"):
-            if (resolucao, implementacao) in falhas:
-                houve_falha = True
-                eixo.plot(x, topo, "X", markersize=9, color=COR[implementacao], zorder=3)
-                nome = "C++" if implementacao == "cpp" else "Python"
-                eixo.annotate(f"{nome}: falhou\n(sem memória)",
-                              (x, topo), textcoords="offset points", xytext=(-9, 0),
-                              ha="right", va="center", fontsize=8, color=TEXTO)
+        falharam = [s for s in series if (resolucao, s) in falhas]
 
-    alcas = [Line2D([], [], color=COR[i], linewidth=2, marker="o", markersize=6, label=NOME[i])
-             for i in ("cpp", "python")]
+        for indice, serie in enumerate(falharam):
+            houve_falha = True
+            eixo.plot(x, topo, "X", markersize=9, color=estilo.cor(serie), zorder=3)
+            eixo.annotate(f"{estilo.nome_curto(serie)}: falhou\n(sem memória)",
+                          (x, topo), textcoords="offset points", xytext=(-9, -22 * indice),
+                          ha="right", va="center", fontsize=8, color=TEXTO)
+
+    alcas = [Line2D([], [], color=estilo.cor(s), linewidth=2, marker=estilo.marcador(s), markersize=6,
+                    linestyle="--" if bloco_de(s) else "-", label=estilo.nome(s))
+             for s in series]
 
     if houve_saturacao:
         alcas.append(Line2D([], [], linestyle="", marker="o", markersize=6, markerfacecolor=SUPERFICIE,
@@ -259,35 +378,43 @@ def grafico_latencia(desempenho, falhas, resolucoes, pasta):
         alcas.append(Line2D([], [], linestyle="", marker="X", markersize=7, color=TEXTO_SECUNDARIO,
                             label="Execução falhou"))
 
-    legenda_superior(eixo, alcas, colunas=2)
+    legenda_superior(eixo, alcas, colunas=2 if len(alcas) <= 4 else 3)
     salvar(figura, pasta, "latencia")
 
 
-def barras_agrupadas(eixo, resolucoes, valores, erros=None, casas=0, sufixo="", marcadas=()):
-    """valores[(resolucao, implementacao)] -> numero ou None (ausente)."""
-    largura = 0.36
+def largura_barra(estilo):
+    return 0.72 if len(estilo.series) <= 2 else 0.84
 
-    for indice, implementacao in enumerate(("cpp", "python")):
-        deslocamento = (indice - 0.5) * largura
+
+def barras_agrupadas(eixo, resolucoes, valores, estilo, erros=None, casas=0, sufixo="", marcadas=()):
+    """valores[(resolucao, implementacao)] -> numero ou None (ausente)."""
+    series = estilo.series
+    largura = largura_barra(estilo) / len(series)
+    # Com muitas barras por grupo os rotulos ficam na vertical para caber.
+    vertical = len(series) > 2
+
+    for indice, serie in enumerate(series):
+        deslocamento = (indice - (len(series) - 1) / 2) * largura
 
         for x, resolucao in enumerate(resolucoes):
-            valor = valores.get((resolucao, implementacao))
+            valor = valores.get((resolucao, serie))
 
             if valor is None:
                 continue
 
-            erro = erros.get((resolucao, implementacao)) if erros else None
+            erro = erros.get((resolucao, serie)) if erros else None
 
             eixo.bar(
                 x + deslocamento, valor, width=largura,
-                color=COR[implementacao], hatch=HACHURA[implementacao],
+                color=estilo.cor(serie), hatch=estilo.hachura(serie),
                 edgecolor=SUPERFICIE, linewidth=1.5,  # borda branca separa barras vizinhas
                 yerr=erro, error_kw={"ecolor": TEXTO_SECUNDARIO, "elinewidth": 1, "capsize": 2},
             )
             eixo.annotate(
-                numero(valor, casas) + sufixo + ("*" if (resolucao, implementacao) in marcadas else ""),
+                numero(valor, casas) + sufixo + ("*" if (resolucao, serie) in marcadas else ""),
                 (x + deslocamento, valor + (erro or 0)),
-                textcoords="offset points", xytext=(0, 3), ha="center", fontsize=7.5, color=TEXTO,
+                textcoords="offset points", xytext=(0, 3), ha="center", va="bottom" if vertical else "baseline",
+                rotation=90 if vertical else 0, fontsize=7 if vertical else 7.5, color=TEXTO,
                 bbox={"facecolor": SUPERFICIE, "edgecolor": "none", "pad": 0.6}, zorder=4,
             )
 
@@ -295,34 +422,46 @@ def barras_agrupadas(eixo, resolucoes, valores, erros=None, casas=0, sufixo="", 
     eixo.set_xlim(-0.6, len(resolucoes) - 0.4)
 
 
-def alcas_barras():
-    return [Patch(facecolor=COR[i], hatch=HACHURA[i], edgecolor=SUPERFICIE, label=NOME[i])
-            for i in ("cpp", "python")]
+def posicao_barra(indice, estilo):
+    largura = largura_barra(estilo) / len(estilo.series)
+    return (indice - (len(estilo.series) - 1) / 2) * largura
 
 
-def grafico_vram(desempenho, falhas, resolucoes, pasta):
-    figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, 3.4))
+def alcas_barras(estilo):
+    return [Patch(facecolor=estilo.cor(s), hatch=estilo.hachura(s), edgecolor=SUPERFICIE, label=estilo.nome(s))
+            for s in estilo.series]
+
+
+def grafico_vram(desempenho, falhas, resolucoes, estilo, pasta):
+    figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, 3.4 if len(estilo.series) <= 2 else 3.8))
 
     valores = {
         chave: float(linha["vram_consumo_mib"]) for chave, linha in desempenho.items()
     }
     saturadas = {chave for chave, linha in desempenho.items() if linha["vram_saturada"] == "1"}
-    barras_agrupadas(eixo, resolucoes, valores, marcadas=saturadas)
+    barras_agrupadas(eixo, resolucoes, valores, estilo, marcadas=saturadas)
 
     # Memoria que o processo tinha de fato disponivel (capacidade - linha de base).
     exemplo = next(iter(desempenho.values()))
     disponivel = float(exemplo["vram_total_mib"]) - float(exemplo["vram_base_mib"])
     eixo.axhline(disponivel, color=TEXTO_SECUNDARIO, linewidth=1, linestyle="--", zorder=1)
-    eixo.annotate(f"VRAM livre no início: {numero(disponivel)} MiB", (-0.45, disponivel),
-                  textcoords="offset points", xytext=(0, 4), ha="left", fontsize=8, color=TEXTO_SECUNDARIO)
+    texto_disponivel = f"VRAM livre no início: {numero(disponivel)} MiB"
+    alcas = alcas_barras(estilo)
+
+    # Com muitas barras nao sobra espaco sobre a linha: o texto vai para a legenda.
+    if len(estilo.series) > 2:
+        alcas.append(Line2D([], [], color=TEXTO_SECUNDARIO, linewidth=1, linestyle="--", label=texto_disponivel))
+    else:
+        eixo.annotate(texto_disponivel, (-0.45, disponivel), textcoords="offset points", xytext=(0, 4),
+                      ha="left", fontsize=8, color=TEXTO_SECUNDARIO)
 
     for x, resolucao in enumerate(resolucoes):
-        for indice, implementacao in enumerate(("cpp", "python")):
-            if (resolucao, implementacao) in falhas:
-                eixo.annotate("falhou", (x + (indice - 0.5) * 0.36, 0), textcoords="offset points",
+        for indice, serie in enumerate(estilo.series):
+            if (resolucao, serie) in falhas:
+                eixo.annotate("falhou", (x + posicao_barra(indice, estilo), 0), textcoords="offset points",
                               xytext=(0, 4), ha="center", fontsize=7.5, color=TEXTO, rotation=90)
 
-    eixo.set_ylim(0, max(disponivel, max(valores.values())) * 1.15)
+    eixo.set_ylim(0, max(disponivel, max(valores.values())) * (1.15 if len(estilo.series) <= 2 else 1.25))
 
     if saturadas:
         figura.text(0.0, -0.04, "* VRAM saturada: o excedente vai para a memória compartilhada do sistema e não "
@@ -330,11 +469,11 @@ def grafico_vram(desempenho, falhas, resolucoes, pasta):
                     fontsize=7.5, color=TEXTO_SECUNDARIO, ha="left", va="top", wrap=True)
     eixo.yaxis.set_major_formatter(formatador())
     eixo.set_ylabel("Pico de VRAM do processo (MiB)")
-    legenda_superior(eixo, alcas_barras())
+    legenda_superior(eixo, alcas, colunas=2 if len(estilo.series) > 2 else None)
     salvar(figura, pasta, "vram")
 
 
-def grafico_etapas(desempenho, resolucoes, pasta):
+def grafico_etapas(desempenho, resolucoes, estilo, pasta):
     etapas = [
         ("upload_ms", "Host → Device"),
         ("pre_ms", "Pré-processamento"),
@@ -342,15 +481,22 @@ def grafico_etapas(desempenho, resolucoes, pasta):
         ("sepconv_ms", "Convolução sepconv"),
         ("download_ms", "Device → Host"),
     ]
-    presentes = [r for r in resolucoes if (r, "cpp") in desempenho]
+    variantes = [s for s in estilo.series if s != "python"]
+    # Uma barra por resolucao e variante do motor C++.
+    barras = [(r, s) for r in resolucoes for s in variantes if (r, s) in desempenho]
 
-    if not presentes:
+    if not barras:
         return
 
-    figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, 0.55 * len(presentes) + 1.2))
+    def rotulo(resolucao, serie):
+        if len(variantes) == 1:
+            return resolucao
+        return f"{resolucao} · {'inteiro' if serie == 'cpp' else f'b{bloco_de(serie)}'}"
 
-    for y, resolucao in enumerate(reversed(presentes)):
-        linha = desempenho[(resolucao, "cpp")]
+    figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, (0.55 if len(variantes) == 1 else 0.45) * len(barras) + 1.2))
+
+    for y, (resolucao, serie) in enumerate(reversed(barras)):
+        linha = desempenho[(resolucao, serie)]
         tempos = [max(float(linha[coluna]), 0.0) for coluna, _ in etapas]
         total = sum(tempos)
         inicio = 0.0
@@ -365,7 +511,7 @@ def grafico_etapas(desempenho, resolucoes, pasta):
 
             inicio += fracao
 
-    eixo.set_yticks(range(len(presentes)), list(reversed(presentes)))
+    eixo.set_yticks(range(len(barras)), [rotulo(*b) for b in reversed(barras)])
     eixo.set_xlim(0, 100)
     eixo.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f}%"))
     eixo.set_xlabel("Parcela do tempo por quadro no motor C++")
@@ -373,25 +519,31 @@ def grafico_etapas(desempenho, resolucoes, pasta):
     eixo.grid(axis="y", visible=False)
     eixo.spines["left"].set_visible(False)
 
+    if len(variantes) > 1:
+        eixo.text(1.0, -0.12 - 0.3 / len(barras), "No motor em blocos, o pré-processamento inclui o cálculo "
+                  "das estatísticas globais e os recortes dos blocos.", transform=eixo.transAxes,
+                  ha="right", va="top", fontsize=7.5, color=TEXTO_SECUNDARIO)
+
     alcas = [Patch(facecolor=cor, label=nome) for cor, (_, nome) in zip(CORES_ETAPAS, etapas)]
     legenda_superior(eixo, alcas, colunas=3)
     salvar(figura, pasta, "etapas_cpp")
 
 
-def grafico_qualidade(qualidade, resolucoes, pasta):
+def grafico_qualidade(qualidade, resolucoes, estilo, pasta):
     metricas = [
         ("psnr", "PSNR (dB)", 2),
         ("ssim", "SSIM", 4),
         ("vmaf", "VMAF", 1),
     ]
     metricas = [m for m in metricas if any(linha.get(f"{m[0]}_media") for linha in qualidade.values())]
-    presentes = [r for r in resolucoes if any((r, i) in qualidade for i in ("cpp", "python"))]
+    presentes = [r for r in resolucoes if any((r, s) in qualidade for s in estilo.series)]
 
     if not metricas or not presentes:
         return
 
     # Uma metrica por linha, com a largura toda, para os rotulos caberem.
-    figura, eixos = plt.subplots(len(metricas), 1, figsize=(LARGURA_FIGURA, 2.3 * len(metricas) + 0.4))
+    altura = 2.3 if len(estilo.series) <= 2 else 2.6
+    figura, eixos = plt.subplots(len(metricas), 1, figsize=(LARGURA_FIGURA, altura * len(metricas) + 0.4))
     eixos = eixos if len(metricas) > 1 else [eixos]
 
     for eixo, (metrica, titulo, casas) in zip(eixos, metricas):
@@ -402,18 +554,28 @@ def grafico_qualidade(qualidade, resolucoes, pasta):
                 valores[chave] = float(linha[f"{metrica}_media"])
                 erros[chave] = float(linha[f"{metrica}_desvio"])
 
-        barras_agrupadas(eixo, presentes, valores, erros, casas=casas)
+        barras_agrupadas(eixo, presentes, valores, estilo, erros, casas=casas)
         eixo.set_title(titulo, loc="left")
         eixo.yaxis.set_major_formatter(formatador(2 if metrica == "ssim" else 0))
-        eixo.set_ylim(0, (1.15 if metrica == "ssim" else 1.18) * max(v + erros[k] for k, v in valores.items()))
+        folga = (1.15 if metrica == "ssim" else 1.18) if len(estilo.series) <= 2 else 1.35
+        eixo.set_ylim(0, folga * max(v + erros[k] for k, v in valores.items()))
 
-    figura.legend(handles=alcas_barras(), loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2)
+    figura.legend(handles=alcas_barras(estilo), loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                  ncol=2 if len(estilo.series) > 2 else len(estilo.series))
     figura.tight_layout()
     salvar(figura, pasta, "qualidade")
 
 
 def grafico_psnr_quadros(quadros, resolucoes, pasta):
-    series = [(r, quadros[(r, "cpp")]) for r in resolucoes if (r, "cpp") in quadros]
+    # Motor C++ com o quadro inteiro; onde ele falhou (4K), usa o motor em
+    # blocos de maior bloco disponivel.
+    series = []
+
+    for resolucao in resolucoes:
+        candidatas = ordenar_series(s for (r, s) in quadros if r == resolucao and s != "python")
+
+        if candidatas:
+            series.append((resolucao, candidatas[0], quadros[(resolucao, candidatas[0])]))
 
     if not series:
         return
@@ -421,10 +583,11 @@ def grafico_psnr_quadros(quadros, resolucoes, pasta):
     figura, eixo = plt.subplots(figsize=(LARGURA_FIGURA, 3.2))
     cores = CORES_RESOLUCAO[-len(series):] if len(series) < len(CORES_RESOLUCAO) else CORES_RESOLUCAO
 
-    for cor, (resolucao, linhas) in zip(cores, series):
+    for cor, (resolucao, serie, linhas) in zip(cores, series):
         xs = [int(linha["quadro"]) for linha in linhas]
         ys = [float(linha["psnr"]) for linha in linhas]
-        eixo.plot(xs, ys, color=cor, linewidth=2, marker="o", markersize=4, label=resolucao)
+        rotulo = resolucao if serie == "cpp" else f"{resolucao} (blocos {bloco_de(serie)})"
+        eixo.plot(xs, ys, color=cor, linewidth=2, marker="o", markersize=4, label=rotulo)
 
     eixo.yaxis.set_major_formatter(formatador())
     eixo.set_xlabel("Índice do quadro sintetizado no vídeo de 30 FPS")
@@ -438,7 +601,7 @@ def grafico_psnr_quadros(quadros, resolucoes, pasta):
 # Tabela LaTeX (booktabs, como no main.tex)
 # =============================================================
 
-def tabela_latex(desempenho, qualidade, falhas, resolucoes, pasta):
+def tabela_latex(desempenho, qualidade, falhas, resolucoes, estilo, pasta):
     linhas = [
         "% Gerado por implementacao/avaliacao/gerar_graficos.py",
         "\\begin{table}[htb]",
@@ -454,9 +617,9 @@ def tabela_latex(desempenho, qualidade, falhas, resolucoes, pasta):
     ]
 
     for resolucao in resolucoes:
-        for implementacao in ("cpp", "python"):
-            nome = "C++/CUDA" if implementacao == "cpp" else "Python/PyTorch"
-            chave = (resolucao, implementacao)
+        for serie in estilo.series:
+            nome = estilo.nome_tabela(serie)
+            chave = (resolucao, serie)
 
             if chave in falhas:
                 linhas.append(f"{resolucao} & {nome} & \\multicolumn{{5}}{{c}}{{falhou por falta de memória}} \\\\")
@@ -481,10 +644,13 @@ def tabela_latex(desempenho, qualidade, falhas, resolucoes, pasta):
         if resolucao != resolucoes[-1]:
             linhas.append("\\midrule")
 
+    margens = {linha["margem"] for linha in desempenho.values() if bloco_de(linha["implementacao"])}
+    nota_blocos = f" Motor em blocos com margem de {'/'.join(sorted(margens))} pixels." if margens else ""
+
     linhas += [
         "\\bottomrule",
         "\\end{tabular}",
-        "\\legend{$^{*}$ VRAM saturada durante a execução. Fonte: Elaborado pelo autor (2026)}",
+        f"\\legend{{$^{{*}}$ VRAM saturada durante a execução.{nota_blocos} Fonte: Elaborado pelo autor (2026)}}",
         "\\end{table}",
     ]
 
@@ -500,21 +666,22 @@ def main():
         sys.exit(1)
 
     pasta_bateria = sys.argv[1]
-    desempenho, qualidade, falhas, quadros, resolucoes = carregar(pasta_bateria)
+    desempenho, qualidade, falhas, quadros, resolucoes, series = carregar(pasta_bateria)
 
     if not desempenho:
         raise SystemExit(f"Erro: nenhum dado de desempenho em {pasta_bateria}")
 
+    estilo = Estilo(series)
     pasta = os.path.join(pasta_bateria, "graficos")
     os.makedirs(pasta, exist_ok=True)
-    print(f"Gerando graficos em {pasta}:")
+    print(f"Gerando graficos em {pasta} (series: {', '.join(series)}):")
 
-    grafico_latencia(desempenho, falhas, resolucoes, pasta)
-    grafico_vram(desempenho, falhas, resolucoes, pasta)
-    grafico_etapas(desempenho, resolucoes, pasta)
-    grafico_qualidade(qualidade, resolucoes, pasta)
+    grafico_latencia(desempenho, falhas, resolucoes, estilo, pasta)
+    grafico_vram(desempenho, falhas, resolucoes, estilo, pasta)
+    grafico_etapas(desempenho, resolucoes, estilo, pasta)
+    grafico_qualidade(qualidade, resolucoes, estilo, pasta)
     grafico_psnr_quadros(quadros, resolucoes, pasta)
-    tabela_latex(desempenho, qualidade, falhas, resolucoes, pasta)
+    tabela_latex(desempenho, qualidade, falhas, resolucoes, estilo, pasta)
 
 
 if __name__ == "__main__":

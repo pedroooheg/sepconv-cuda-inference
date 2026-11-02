@@ -1,18 +1,24 @@
 # Bateria de testes com os videos do GTA VI: C++ x Python.
 #
-# Para cada resolucao, cada implementacao interpola 2x o video de 15 FPS
-# (mede desempenho e VRAM) e o resultado e comparado com o video real de
-# 30 FPS (mede PSNR/SSIM/VMAF). Tudo fica em resultados\testes_gta\<data_hora>\.
+# Para cada resolucao, cada implementacao (motor C++ com o quadro inteiro,
+# motor C++ em blocos de cada tamanho de -Blocos e Python) interpola 2x o
+# video de 15 FPS (mede desempenho e VRAM) e o resultado e comparado com o
+# video real de 30 FPS (mede PSNR/SSIM/VMAF). Tudo fica em
+# resultados\testes_gta\<data_hora>\.
 #
 # Uso (na raiz do projeto):
 #   .\implementacao\avaliacao\executar_testes_gta.ps1
 #   .\implementacao\avaliacao\executar_testes_gta.ps1 -Resolucoes 720p,1080p
 #   .\implementacao\avaliacao\executar_testes_gta.ps1 -Incluir4K -QuadrosMax4K 5
+#   .\implementacao\avaliacao\executar_testes_gta.ps1 -Blocos 1024,512,256 -Margem 96
+#   .\implementacao\avaliacao\executar_testes_gta.ps1 -Blocos @()    (so a v1)
 
 param(
     [string[]] $Resolucoes = @("720p", "1080p", "1440p"),
     [switch] $Incluir4K,
-    [int] $QuadrosMax4K = 5
+    [int] $QuadrosMax4K = 5,
+    [int[]] $Blocos = @(512, 256),
+    [int] $Margem = 96
 )
 
 $ErrorActionPreference = "Continue"
@@ -23,9 +29,13 @@ Set-Location $Raiz
 $Motor = "implementacao\motor_cpp\build\Release\sepconv_engine.exe"
 $Python = "venv\Scripts\python.exe"
 $Modelo = "modelos\sepconv_paper.onnx"
+$ModeloBlocos = "modelos\sepconv_blocos.onnx"
 $Pasta = "resultados\testes_gta\" + (Get-Date -Format "yyyy-MM-dd_HH-mm")
 
-foreach ($Arquivo in @($Motor, $Python, $Modelo)) {
+$Necessarios = @($Motor, $Python, $Modelo)
+if ($Blocos.Count -gt 0) { $Necessarios += $ModeloBlocos }
+
+foreach ($Arquivo in $Necessarios) {
     if (-not (Test-Path $Arquivo)) {
         Write-Host "Nao encontrado: $Arquivo" -ForegroundColor Red
         exit 1
@@ -54,13 +64,20 @@ function Testar([string] $Res, [int] $MaxQuadros) {
     # medicoes suficientes.
     if ($MaxQuadros -gt 0) { $Extra = @("--max-frames", "$MaxQuadros", "--warmup", "1") }
 
-    foreach ($Impl in @("cpp", "python")) {
+    # Os rotulos sao os mesmos que o motor grava no CSV (cpp, cpp_b512, ...).
+    $Implementacoes = @("cpp") + @($Blocos | ForEach-Object { "cpp_b$_" }) + @("python")
+
+    foreach ($Impl in $Implementacoes) {
         $Video = "$Pasta\saidas\${Impl}_${Res}.mkv"
 
         Write-Host "`n========== $Impl | $Res ==========" -ForegroundColor Cyan
 
         if ($Impl -eq "cpp") {
             & $Motor --model $Modelo --video $Entrada --out $Video --factor 2 --csv "$Pasta\desempenho.csv" @Extra
+        }
+        elseif ($Impl -like "cpp_b*") {
+            $Bloco = $Impl.Substring(5)
+            & $Motor --model $ModeloBlocos --video $Entrada --out $Video --factor 2 --bloco $Bloco --margem $Margem --csv "$Pasta\desempenho.csv" @Extra
         }
         else {
             & $Python implementacao\avaliacao\benchmark_python.py --video $Entrada --out $Video --factor 2 --csv "$Pasta\desempenho.csv" @Extra
