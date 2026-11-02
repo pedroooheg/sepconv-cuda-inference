@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -60,15 +61,19 @@ struct SepconvRegion
 //
 // A borda "replicate" de 25 pixels do original e obtida limitando as
 // coordenadas de leitura, sem alocar copias dos quadros com padding na VRAM.
+//
+// Filter e float ou __half (modelo FP16); com __half, cada coeficiente e
+// convertido para float na leitura e a acumulacao continua em float.
+template <typename Filter>
 void launch_sepconv(
     const float* frame1,
     const float* frame2,
     int width,
     int height,
-    const float* ver1,
-    const float* hor1,
-    const float* ver2,
-    const float* hor2,
+    const Filter* ver1,
+    const Filter* hor1,
+    const Filter* ver2,
+    const Filter* hor2,
     const SepconvRegion& region,
     std::uint8_t* out,
     int out_width,

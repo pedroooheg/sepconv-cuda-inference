@@ -20,6 +20,10 @@
 //   --bloco T --margem M       processamento em blocos T x T com M pixels de
 //                              margem (exige o modelo sepconv_blocos.onnx);
 //                              --bloco 0 (padrao) processa o quadro inteiro
+//
+// Com os modelos *_fp16.onnx (implementacao/fp16), a rede roda em meia
+// precisao e os filtros saem em FP16; o kernel sepconv os le em FP16 e
+// acumula em FP32. O tipo e detectado pela saida do modelo.
 //   --csv arquivo.csv          acrescenta uma linha de resumo ao CSV
 //   --ort-option chave=valor   repassa opcoes ao CUDA Execution Provider,
 //                              ex.: cudnn_conv_algo_search=HEURISTIC
@@ -29,7 +33,12 @@
 //                              configuracao de cada execucao (Run), ex.:
 //                              memory.enable_memory_arena_shrinkage=gpu:0
 //   --padrao-memoria 0|1       planejamento de memoria do ONNX Runtime
-//                              (memory pattern); padrao 1
+//                              (memory pattern); padrao 0
+//
+// Ate o estudo do alocador (implementacao/alocador), o motor usava o padrao
+// de memoria ligado e arena_extend_strategy=kSameAsRequested; para repetir
+// esse comportamento:
+//   --padrao-memoria 1 --ort-option arena_extend_strategy=kSameAsRequested
 
 #include "sepconv_kernels.cuh"
 
@@ -93,7 +102,7 @@ struct Arguments
     int max_frames = 0;
     int tile = 0;
     int margin = 96;
-    bool memory_pattern = true;
+    bool memory_pattern = false;
     std::vector<std::pair<std::string, std::string>> ort_options;
     std::vector<std::pair<std::string, std::string>> session_configs;
     std::vector<std::pair<std::string, std::string>> run_configs;
@@ -359,8 +368,10 @@ public:
           env_(ORT_LOGGING_LEVEL_ERROR, "SepConvEngine"),
           cuda_memory_("Cuda", OrtDeviceAllocator, 0, OrtMemTypeDefault)
     {
-        allocate_buffers();
+        // A sessao vem antes dos buffers: o tipo dos filtros (FP32 ou FP16)
+        // e definido pelo modelo.
         create_session(args);
+        allocate_buffers();
 
         if (tile_ == 0)
         {
@@ -389,7 +400,7 @@ public:
         cudaFree(d_stats_);
         cudaFree(d_partials_);
 
-        for (float* filter : d_filters_)
+        for (void* filter : d_filters_)
         {
             cudaFree(filter);
         }
@@ -402,6 +413,9 @@ public:
 
     int width() const { return width_; }
     int height() const { return height_; }
+    bool half_filters() const { return half_filters_; }
+
+    std::size_t filter_bytes() const { return half_filters_ ? sizeof(__half) : sizeof(float); }
 
     double buffers_mib() const
     {
@@ -412,7 +426,7 @@ public:
         return (2.0 * pixels * 3 +                                          // quadros uint8
                 2.0 * pixels * 3 * sizeof(float) +                          // quadros float
                 tile_frames +                                               // recortes dos blocos
-                4.0 * filter_pixels * SEPCONV_KERNEL_SIZE * sizeof(float) + // filtros 1D
+                4.0 * filter_pixels * SEPCONV_KERNEL_SIZE * filter_bytes() + // filtros 1D
                 static_cast<double>(out_width_) * out_height_ * 3)          // saida uint8
                / (1024.0 * 1024.0);
     }
@@ -509,9 +523,18 @@ private:
     {
         // Ordem de saida do ONNX: kernel_v1, kernel_v2, kernel_h1, kernel_h2.
         cudaEventRecord(events_[3]);
-        launch_sepconv(frame_one, frame_two, width_, height_,
-                       d_filters_[0], d_filters_[2], d_filters_[1], d_filters_[3],
-                       region, d_out_, out_width_, out_height_, nullptr);
+        if (half_filters_)
+        {
+            launch_sepconv(frame_one, frame_two, width_, height_,
+                           filters<__half>(0), filters<__half>(2), filters<__half>(1), filters<__half>(3),
+                           region, d_out_, out_width_, out_height_, nullptr);
+        }
+        else
+        {
+            launch_sepconv(frame_one, frame_two, width_, height_,
+                           filters<float>(0), filters<float>(2), filters<float>(1), filters<float>(3),
+                           region, d_out_, out_width_, out_height_, nullptr);
+        }
         check_cuda(cudaGetLastError(), "launch sepconv");
         cudaEventRecord(events_[4]);
         check_cuda(cudaEventSynchronize(events_[4]), "sepconv");
@@ -651,9 +674,9 @@ private:
             check_cuda(cudaMalloc(&d_partials_, 2 * SEPCONV_REDUCTION_BLOCKS * sizeof(double)), "cudaMalloc partials");
         }
 
-        for (float*& filter : d_filters_)
+        for (void*& filter : d_filters_)
         {
-            check_cuda(cudaMalloc(&filter, filter_pixels * SEPCONV_KERNEL_SIZE * sizeof(float)), "cudaMalloc filtro");
+            check_cuda(cudaMalloc(&filter, filter_pixels * SEPCONV_KERNEL_SIZE * filter_bytes()), "cudaMalloc filtro");
         }
 
         check_cuda(cudaMalloc(&d_out_, static_cast<std::size_t>(out_width_) * out_height_ * 3), "cudaMalloc out");
@@ -664,10 +687,15 @@ private:
         Ort::SessionOptions session_options;
         session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-        if (!args.memory_pattern)
+        // Com o padrao de memoria ligado, o pico de VRAM no quadro inteiro em
+        // 1080p sobe cerca de 1,9 GB sem ganho de tempo (implementacao/alocador).
+        if (args.memory_pattern)
+        {
+            std::cout << "Padrao de memoria do ONNX Runtime ativado\n";
+        }
+        else
         {
             session_options.DisableMemPattern();
-            std::cout << "Padrao de memoria do ONNX Runtime desativado\n";
         }
 
         for (const auto& [key, value] : args.session_configs)
@@ -686,14 +714,39 @@ private:
         OrtCUDAProviderOptionsV2* cuda_options = nullptr;
         Ort::ThrowOnError(api.CreateCUDAProviderOptions(&cuda_options));
 
-        std::vector<const char*> option_keys = { "device_id", "arena_extend_strategy" };
-        std::vector<const char*> option_values = { "0", "kSameAsRequested" };
+        // Arena em potencias de dois: nos blocos, os recortes da borda do
+        // quadro tem formatos diferentes, e blocos de memoria maiores sao
+        // reaproveitados entre eles (ver implementacao/alocador). As opcoes
+        // de --ort-option substituem estes valores.
+        std::vector<std::pair<std::string, std::string>> options = {
+            { "device_id", "0" },
+            { "arena_extend_strategy", "kNextPowerOfTwo" },
+        };
 
         for (const auto& [key, value] : args.ort_options)
         {
+            const auto existing = std::find_if(options.begin(), options.end(),
+                                               [&](const auto& option) { return option.first == key; });
+
+            if (existing != options.end())
+            {
+                existing->second = value;
+            }
+            else
+            {
+                options.emplace_back(key, value);
+            }
+
+            std::cout << "Opcao do CUDA EP: " << key << "=" << value << "\n";
+        }
+
+        std::vector<const char*> option_keys;
+        std::vector<const char*> option_values;
+
+        for (const auto& [key, value] : options)
+        {
             option_keys.push_back(key.c_str());
             option_values.push_back(value.c_str());
-            std::cout << "Opcao do CUDA EP: " << key << "=" << value << "\n";
         }
 
         Ort::ThrowOnError(api.UpdateCUDAProviderOptions(
@@ -716,7 +769,21 @@ private:
             );
         }
 
+        half_filters_ = session_.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetElementType() ==
+                        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+
+        if (half_filters_)
+        {
+            std::cout << "Modelo em FP16: filtros em meia precisao\n";
+        }
+
         binding_ = Ort::IoBinding(session_);
+    }
+
+    template <typename Filter>
+    const Filter* filters(int index) const
+    {
+        return static_cast<const Filter*>(d_filters_[index]);
     }
 
     // I/O binding: entradas e saidas do ONNX apontam diretamente para os
@@ -741,8 +808,9 @@ private:
 
         for (int i = 0; i < 4; ++i)
         {
-            tensors_.push_back(Ort::Value::CreateTensor<float>(
-                cuda_memory_, d_filters_[i], pixels * SEPCONV_KERNEL_SIZE, filter_shape, 4
+            tensors_.push_back(Ort::Value::CreateTensor(
+                cuda_memory_, d_filters_[i], pixels * SEPCONV_KERNEL_SIZE * filter_bytes(), filter_shape, 4,
+                half_filters_ ? ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 : ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
             ));
             binding_.BindOutput(output_names[i], tensors_.back());
         }
@@ -788,7 +856,8 @@ private:
     float* d_tile_two_ = nullptr;
     float* d_stats_ = nullptr;
     double* d_partials_ = nullptr;
-    float* d_filters_[4] = {};
+    void* d_filters_[4] = {};
+    bool half_filters_ = false;
     std::uint8_t* d_out_ = nullptr;
 
     int bound_width_ = 0;
@@ -822,6 +891,7 @@ struct Summary
     int factor = 0;
     int written_frames = 0;
     double wall_seconds = 0.0;
+    bool half_filters = false;
 };
 
 void print_report(const StageTimes& times, const VramMonitor& vram, const SepConvEngine& engine, const Summary& summary)
@@ -882,7 +952,8 @@ void append_csv(const std::string& path, const StageTimes& times, const VramMoni
     }
 
     csv << std::fixed << std::setprecision(3)
-        << (summary.tile > 0 ? "cpp_b" + std::to_string(summary.tile) : std::string("cpp")) << ','
+        << (summary.tile > 0 ? "cpp_b" + std::to_string(summary.tile) : std::string("cpp"))
+        << (summary.half_filters ? "_fp16" : "") << ','
         << summary.mode << ',' << std::filesystem::path(summary.input).filename().string() << ','
         << summary.width << ',' << summary.height << ',' << summary.factor << ',' << times.total.size() << ','
         << mean(times.upload) << ',' << mean(times.preprocess) << ',' << mean(times.inference) << ','
@@ -946,7 +1017,7 @@ int run_image_mode(const Arguments& args, VramMonitor& vram)
         throw std::runtime_error("nao foi possivel gravar " + args.out);
     }
 
-    Summary summary{ args.tile, args.margin, "imagem", args.one, one.cols, one.rows, 2, 1, 0.0 };
+    Summary summary{ args.tile, args.margin, "imagem", args.one, one.cols, one.rows, 2, 1, 0.0, engine.half_filters() };
     print_report(times, vram, engine, summary);
 
     if (!args.csv.empty())
@@ -1068,7 +1139,10 @@ int run_video_mode(const Arguments& args, VramMonitor& vram)
 
     std::cout << "\n";
 
-    Summary summary{ args.tile, args.margin, "video", args.video, width, height, args.factor, written, wall_seconds };
+    Summary summary{
+        args.tile, args.margin, "video", args.video, width, height, args.factor, written, wall_seconds,
+        engine.half_filters()
+    };
     print_report(times, vram, engine, summary);
 
     if (!args.csv.empty())

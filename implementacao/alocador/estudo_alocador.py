@@ -29,7 +29,11 @@ MODELOS = {
     "blocos": os.path.join(RAIZ, "modelos", "sepconv_blocos.onnx"),
 }
 
-LIBERAR_ARENA = ["--ort-run-config", "memory.enable_memory_arena_shrinkage=gpu:0"]
+# Configuracao do motor antes deste estudo, base de todas as variacoes
+# (as opcoes de cada configuracao vem depois e a substituem).
+BASE = ["--padrao-memoria", "1", "--ort-option", "arena_extend_strategy=kSameAsRequested"]
+
+LIBERAR_ARENA =["--ort-run-config", "memory.enable_memory_arena_shrinkage=gpu:0"]
 PESOS_FORA_DA_ARENA = ["--ort-config", "session.use_device_allocator_for_initializers=1"]
 HEURISTICA = ["--ort-option", "cudnn_conv_algo_search=HEURISTIC"]
 SEM_WORKSPACE_MAXIMO = ["--ort-option", "cudnn_conv_use_max_workspace=0"]
@@ -96,7 +100,7 @@ def executar(rotulo, bloco, extras, pasta):
         MOTOR, "--model", MODELOS["blocos" if bloco else "inteiro"],
         "--video", entrada, "--out", saida, "--factor", "2",
         "--max-frames", str(args.quadros), "--warmup", str(args.aquecimento), "--csv", resumo,
-    ] + (["--bloco", str(bloco)] if bloco else []) + extras
+    ] + (["--bloco", str(bloco)] if bloco else []) + BASE + extras
 
     processo = subprocess.run(comando, capture_output=True, text=True, encoding="utf-8", errors="replace")
 

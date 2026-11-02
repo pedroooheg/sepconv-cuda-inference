@@ -79,11 +79,14 @@ __global__ void frame_sums_kernel(
 //
 // Retorna a soma dos pesos do kernel 2D (sum(v) * sum(h)), equivalente ao
 // canal de "uns" que o codigo original concatena para normalizar a saida.
-template <int K>
+__device__ __forceinline__ float to_float(float value) { return value; }
+__device__ __forceinline__ float to_float(__half value) { return __half2float(value); }
+
+template <typename Filter, int K>
 __device__ float accumulate_frame(
     const float* __restrict__ frame,
-    const float* __restrict__ ver,
-    const float* __restrict__ hor,
+    const Filter* __restrict__ ver,
+    const Filter* __restrict__ hor,
     std::size_t filter_plane,
     std::size_t filter_pixel,
     int x,
@@ -104,7 +107,7 @@ __device__ float accumulate_frame(
     #pragma unroll
     for (int fx = 0; fx < K; ++fx)
     {
-        h[fx] = hor[fx * filter_plane + filter_pixel];
+        h[fx] = to_float(hor[fx * filter_plane + filter_pixel]);
         sx[fx] = min(max(x + fx - R, 0), width - 1);
         hor_sum += h[fx];
     }
@@ -113,7 +116,7 @@ __device__ float accumulate_frame(
 
     for (int fy = 0; fy < K; ++fy)
     {
-        const float v = ver[fy * filter_plane + filter_pixel];
+        const float v = to_float(ver[fy * filter_plane + filter_pixel]);
         ver_sum += v;
 
         const int sy = min(max(y + fy - R, 0), height - 1);
@@ -139,16 +142,16 @@ __device__ float accumulate_frame(
     return ver_sum * hor_sum;
 }
 
-template <int K>
+template <typename Filter, int K>
 __global__ void __launch_bounds__(256) sepconv_kernel(
     const float* __restrict__ frame1,
     const float* __restrict__ frame2,
     int width,
     int height,
-    const float* __restrict__ ver1,
-    const float* __restrict__ hor1,
-    const float* __restrict__ ver2,
-    const float* __restrict__ hor2,
+    const Filter* __restrict__ ver1,
+    const Filter* __restrict__ hor1,
+    const Filter* __restrict__ ver2,
+    const Filter* __restrict__ hor2,
     SepconvRegion region,
     std::uint8_t* __restrict__ out,
     int out_width,
@@ -174,8 +177,8 @@ __global__ void __launch_bounds__(256) sepconv_kernel(
     float acc[3] = { 0.0f, 0.0f, 0.0f };
 
     float norm =
-        accumulate_frame<K>(frame1, ver1, hor1, filter_plane, filter_pixel, x, y, width, height, acc) +
-        accumulate_frame<K>(frame2, ver2, hor2, filter_plane, filter_pixel, x, y, width, height, acc);
+        accumulate_frame<Filter, K>(frame1, ver1, hor1, filter_plane, filter_pixel, x, y, width, height, acc) +
+        accumulate_frame<Filter, K>(frame2, ver2, hor2, filter_plane, filter_pixel, x, y, width, height, acc);
 
     // Mesmo criterio do run.py: evita divisao por valores proximos de zero.
     if (fabsf(norm) < 0.01f)
@@ -245,15 +248,16 @@ void frame_sums(
     }
 }
 
+template <typename Filter>
 void launch_sepconv(
     const float* frame1,
     const float* frame2,
     int width,
     int height,
-    const float* ver1,
-    const float* hor1,
-    const float* ver2,
-    const float* hor2,
+    const Filter* ver1,
+    const Filter* hor1,
+    const Filter* ver2,
+    const Filter* hor2,
     const SepconvRegion& region,
     std::uint8_t* out,
     int out_width,
@@ -263,8 +267,16 @@ void launch_sepconv(
 {
     const dim3 block(32, 8);
 
-    sepconv_kernel<SEPCONV_KERNEL_SIZE><<<grid_for(region.width, region.height, block), block, 0, stream>>>(
+    sepconv_kernel<Filter, SEPCONV_KERNEL_SIZE><<<grid_for(region.width, region.height, block), block, 0, stream>>>(
         frame1, frame2, width, height, ver1, hor1, ver2, hor2,
         region, out, out_width, out_height
     );
 }
+
+template void launch_sepconv<float>(
+    const float*, const float*, int, int, const float*, const float*, const float*, const float*,
+    const SepconvRegion&, std::uint8_t*, int, int, cudaStream_t);
+
+template void launch_sepconv<__half>(
+    const float*, const float*, int, int, const __half*, const __half*, const __half*, const __half*,
+    const SepconvRegion&, std::uint8_t*, int, int, cudaStream_t);
