@@ -20,6 +20,9 @@ modelos/
 *.mkv
 desktop.ini
 
+# Material pessoal de estudo para as bancas (nao faz parte do projeto)
+estudo/
+
 # Conjuntos de avaliacao baixados e quadros sintetizados a partir deles
 dados/vimeo90k/
 resultados/conjuntos/*/saidas/
