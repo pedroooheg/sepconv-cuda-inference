@@ -192,7 +192,7 @@ def linearizacao():
 
     eixo.text(1.75, 1.8, "linha, coluna", ha="center", fontsize=7, color=TEXTO_SECUNDARIO)
     seta(eixo, (3.55, 3.75), (4.8, 3.75))
-    eixo.text(4.17, 3.28, "$i = y \\cdot W + x$", ha="center", va="top", fontsize=7, color=TEXTO_SECUNDARIO)
+    eixo.text(4.17, 4.0, "$i = y \\cdot W$\n$+\\ x$", ha="center", va="bottom", fontsize=7, color=TEXTO_SECUNDARIO)
 
     eixo.text(10.4, 5.95, "(b) Vetor contíguo na memória", ha="center", fontsize=8.5, color=TEXTO)
 
@@ -480,7 +480,7 @@ def host_device():
     eixo.add_patch(FancyBboxPatch((0.2, 0.25), 5.6, 4.95, boxstyle="round,pad=0.02,rounding_size=0.12", facecolor="#f4f3ef", edgecolor=GRADE))
     eixo.text(3.0, 4.75, "Host", ha="center", fontsize=9, fontweight="semibold", color=TEXTO)
     caixa(eixo, 0.7, 2.75, 4.6, 1.3, "CPU\nleitura e gravação do vídeo", tamanho=7)
-    caixa(eixo, 0.7, 0.75, 4.6, 1.3, "RAM (16 GB)\nquadros de entrada e de saída", cor="#fbeadf", borda=COR_PYTHON, tamanho=7)
+    caixa(eixo, 0.7, 0.75, 4.6, 1.3, "RAM (16 GB)\nquadros de entrada e saída", cor="#fbeadf", borda=COR_PYTHON, tamanho=7)
     seta(eixo, (3.0, 2.05), (3.0, 2.75), duas=True)
 
     eixo.add_patch(FancyBboxPatch((10.2, 0.25), 5.6, 4.95, boxstyle="round,pad=0.02,rounding_size=0.12", facecolor="#f4f3ef", edgecolor=GRADE))
